@@ -1,0 +1,52 @@
+# mise installs this exact compiler version without changing system packages.
+[tools]
+go = "1.27.3"
+
+[env]
+# Let mise select Go; prevent Go from downloading a different compiler itself.
+GOTOOLCHAIN = "local"
+
+[tasks.dev]
+description = "Compile and run Hello World"
+run = "go run ./cmd/near-e2ee-proxy"
+
+[tasks.build]
+description = "Build the executable into bin/"
+run = "go build -o bin/near-e2ee-proxy ./cmd/near-e2ee-proxy"
+
+[tasks.fmt]
+description = "Format Go source files in place"
+run = "gofmt -w cmd"
+
+[tasks.format-check]
+description = "Check Go formatting without changing files"
+run = '''
+unformatted="$(gofmt -l cmd)"
+if [ -n "$unformatted" ]; then
+  printf 'Run mise run fmt to format these files:\n%s\n' "$unformatted" >&2
+  exit 1
+fi
+'''
+
+[tasks.vet]
+description = "Check Go code for common mistakes"
+run = "go vet ./..."
+
+[tasks.test]
+description = "Run Go tests (unit tests will arrive with stage two)"
+run = "go test ./..."
+
+[tasks.smoke]
+description = "Check that the built executable prints the expected greeting"
+depends = ["build"]
+run = '''
+output="$(./bin/near-e2ee-proxy)"
+if [ "$output" != 'Hello, world!' ]; then
+  printf 'Hello World smoke check failed: unexpected output.\n' >&2
+  exit 1
+fi
+'''
+
+[tasks.check]
+description = "Run formatting, vet, tests, build and executable smoke checks"
+depends = ["format-check", "vet", "test", "smoke"]
