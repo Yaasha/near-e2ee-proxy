@@ -1,6 +1,8 @@
 # mise installs this exact compiler version without changing system packages.
 [tools]
 go = "1.27.3"
+actionlint = "1.7.12"
+hadolint = "2.15.1"
 
 [env]
 # Let mise select Go; prevent Go from downloading a different compiler itself.
@@ -13,7 +15,21 @@ run = "go run ./cmd/near-e2ee-proxy"
 
 [tasks.build]
 description = "Build the proxy into bin/"
+depends = ["toolchain"]
 run = "go build -o bin/ ./cmd/..."
+
+[tasks.toolchain]
+description = "Reject compiler drift from the mise and module pins"
+run = "sh tools/check-go.sh"
+
+[tasks.lint]
+description = "Lint workflows and Dockerfile with pinned tools (no source rewriting)"
+run = "actionlint -shellcheck= && hadolint Dockerfile"
+
+[tasks.container-test]
+description = "Build and test a hardened container; requires Docker (CONTAINER_ARCH=amd64 or arm64)"
+depends = ["toolchain"]
+run = "go test -tags=container ./internal/container -count=1 -timeout=20m -v"
 
 [tasks.fmt]
 description = "Format Go source files in place"
@@ -31,10 +47,12 @@ fi
 
 [tasks.vet]
 description = "Check Go code for common mistakes"
+depends = ["toolchain"]
 run = "go vet ./..."
 
 [tasks.test]
 description = "Run offline Go tests with the race detector"
+depends = ["toolchain"]
 run = "go test -race ./..."
 
 [tasks.smoke]

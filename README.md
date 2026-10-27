@@ -4,8 +4,9 @@ A small self-hosted Go service that exposes **OpenAI Chat Completions** and uses
 NEAR AI's official SDK for verified, end-to-end encrypted inference.
 
 Supports text JSON, incremental encrypted SSE, native function calls and encrypted
-tool-result continuation. Responses, Docker packaging and automated image
-publication are not currently included.
+tool-result continuation, with hardened Linux AMD64/ARM64 container packaging and
+GitHub validation CI. Responses and automated image publication are not currently
+included.
 
 The local host is trusted. The proxy also trusts NEAR's deployment and
 update controls. It verifies CPU/GPU evidence and model-response signatures, but
@@ -79,13 +80,28 @@ successful completion marker; text already consumed cannot be retracted. JSON
 responses remain fully verified before delivery. Cold attestation still delays
 the first request; allow up to three minutes overall. See [streaming security](docs/SECURITY.md#streaming-tradeoff).
 
+## Containers
+
+Build locally with `docker build -t near-e2ee-proxy:local .`, supply separate
+`NEAR_AI_API_KEY` and `PROXY_API_KEY` process environment variables, then run
+`docker compose --env-file /dev/null up --build -d`. The example publishes only
+`127.0.0.1:8080` and runs non-root with a read-only filesystem and no capabilities.
+Starting the container makes no inference request.
+
+The image listens on `0.0.0.0:8080` inside its network namespace; the standalone
+binary still defaults to `127.0.0.1:8080`. Its shell-free `-healthcheck` command
+probes only local `/healthz`, without credentials or NEAR access. Readiness is a
+separate authenticated check. See [container operations and CI](docs/CONTAINERS.md)
+for build/test commands, key setup, shutdown behavior and deliberate remote access.
+Images are built locally; automated GHCR publication is follow-up work.
+
 ## Configuration
 
 | Setting | Meaning |
 | --- | --- |
 | `NEAR_AI_API_KEY` | Outbound NEAR Cloud credential |
 | `PROXY_API_KEY` | Inbound shared token, 32–256 non-whitespace ASCII characters |
-| `LISTEN_ADDR` | Default `127.0.0.1:8080` |
+| `LISTEN_ADDR` | Default `127.0.0.1:8080` for the standalone binary; `0.0.0.0:8080` in the image |
 | `MODELS` | Models advertised by `/v1/models` and probed by `/readyz`; default `Qwen/Qwen3.8-27B`; at most eight |
 
 `MODELS` is a discovery/readiness list, not an allowlist. Authenticated requests
@@ -121,6 +137,8 @@ automatic inference retry. All routes except process liveness require proxy auth
 | `mise run test` | Offline tests with the race detector |
 | `mise run smoke` | Check CLI startup and an HTTP listener with a synthetic backend |
 | `mise run check` | Formatting, vet, offline tests, build and smoke checks |
+| `mise run lint` | Pinned workflow and Dockerfile lint checks; no source rewriting |
+| `mise run container-test` | Offline built-container and Compose regressions; requires Docker |
 | `mise run live` | Four short paid requests: JSON, SSE, tool call and tool result |
 | `mise run benchmark` | Ten bounded paid requests comparing proxy/API timing; [methodology](docs/BENCHMARKING.md) |
 
@@ -150,7 +168,8 @@ carry cancellation/deadlines; the buffered channel in the HTTP server limits
 concurrent work. Tests live beside the code in `*_test.go` files. `go test ./...`
 means all packages in the module.
 
-Go is pinned in `mise.toml`/`mise.lock`. The only direct application dependency is
+Go and the validation linters are pinned in `mise.toml`/`mise.lock`. Builds reject
+compiler drift from those pins and `go.mod`. The only direct application dependency is
 NEAR's SDK at `v0.2.0-rc.1` (a release candidate); `go.mod` and `go.sum` record its
 transitive dependencies. Their verification machinery is larger than this proxy.
 

@@ -95,6 +95,15 @@ verified on every request.
 
 ## Limits of the claim
 
+The container example runs as UID/GID 65532, uses a read-only root filesystem,
+drops Linux capabilities and enables `no-new-privileges`. Host publishing is bound
+to loopback. Its liveness probe calls only local `/healthz`, with a two-second
+deadline and no credentials, ambient HTTP proxy or redirects. Authenticated
+`/readyz` remains a separate hardware-admission operation and is not a periodic
+container health check. See [container operations](CONTAINERS.md) for trusted TLS
+termination/tunnel guidance and the validation limits. Container hardening does
+not change the trusted-host, deployment-control, E2EE or receipt assumptions above.
+
 The project has not undergone an independent security audit. It does not
 promise protection against invasive physical attacks, undisclosed hardware bugs,
 malicious trusted software, compromised clients/proxy hosts, or all metadata
