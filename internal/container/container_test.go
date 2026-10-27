@@ -305,11 +305,13 @@ func TestComposeConfiguration(t *testing.T) {
 	t.Setenv("PROXY_API_KEY", proxyKey)
 	t.Setenv("MODELS", "synthetic-host-model")
 	t.Setenv("LISTEN_ADDR", "127.0.0.1:9099")
+	t.Setenv("PROXY_IMAGE", "")
 	// Explicitly disable Compose's automatic dotenv loading. No real env file
 	// or secret mount is read, even when the caller has development state.
 	data := mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
 	var config struct {
 		Services map[string]struct {
+			Image           string
 			Restart         string            `json:"restart"`
 			ReadOnly        bool              `json:"read_only"`
 			StopGracePeriod string            `json:"stop_grace_period"`
@@ -326,6 +328,9 @@ func TestComposeConfiguration(t *testing.T) {
 		t.Fatal("parse Compose configuration")
 	}
 	service := config.Services["proxy"]
+	if service.Image != "near-e2ee-proxy:local" {
+		t.Fatal("Compose must default to the local build image")
+	}
 	if service.Restart != "unless-stopped" || !service.ReadOnly || service.StopGracePeriod != "15s" || strings.Join(service.CapDrop, ",") != "ALL" || strings.Join(service.SecurityOpt, ",") != "no-new-privileges:true" || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Target != 8080 {
 		t.Fatal("Compose must preserve loopback publishing, shutdown and runtime hardening")
 	}
@@ -336,5 +341,10 @@ func TestComposeConfiguration(t *testing.T) {
 		if _, exists := service.Environment[setting]; exists {
 			t.Fatal("Compose must rely on image and application defaults for optional settings")
 		}
+	}
+	t.Setenv("PROXY_IMAGE", "ghcr.io/yaasha/near-e2ee-proxy@sha256:"+strings.Repeat("a", 64))
+	data = mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
+	if json.Unmarshal(data, &config) != nil || config.Services["proxy"].Image != os.Getenv("PROXY_IMAGE") {
+		t.Fatal("operator-selected digest must reach the Compose service")
 	}
 }

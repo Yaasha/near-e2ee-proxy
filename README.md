@@ -5,8 +5,8 @@ NEAR AI's official SDK for verified, end-to-end encrypted inference.
 
 Supports text JSON, incremental encrypted SSE, native function calls and encrypted
 tool-result continuation, with hardened Linux AMD64/ARM64 container packaging and
-GitHub validation CI. Responses and automated image publication are not currently
-included.
+GitHub validation CI, and development image publication to GHCR. Responses and
+stable semantic-version releases are not currently included.
 
 The local host is trusted. The proxy also trusts NEAR's deployment and
 update controls. It verifies CPU/GPU evidence and model-response signatures, but
@@ -93,7 +93,11 @@ binary still defaults to `127.0.0.1:8080`. Its shell-free `-healthcheck` command
 probes only local `/healthz`, without credentials or NEAR access. Readiness is a
 separate authenticated check. See [container operations and CI](docs/CONTAINERS.md)
 for build/test commands, key setup, shutdown behavior and deliberate remote access.
-Images are built locally; automated GHCR publication is follow-up work.
+Validated development images are published as
+`ghcr.io/yaasha/near-e2ee-proxy:main` and `:sha-<full-commit>` for Linux AMD64/ARM64.
+Pin an exact digest for deployment; publication does not update running services.
+See [distribution and deliberate updates](docs/CONTAINERS.md#development-images-on-ghcr),
+including the first-publication visibility requirement and anonymous-pull checks.
 
 ## Configuration
 
@@ -139,6 +143,7 @@ automatic inference retry. All routes except process liveness require proxy auth
 | `mise run check` | Formatting, vet, offline tests, build and smoke checks |
 | `mise run lint` | Pinned workflow and Dockerfile lint checks; no source rewriting |
 | `mise run container-test` | Offline built-container and Compose regressions; requires Docker |
+| `mise run distribution-test` | Offline publication gates and registry-inspection fixtures |
 | `mise run live` | Four short paid requests: JSON, SSE, tool call and tool result |
 | `mise run benchmark` | Ten bounded paid requests comparing proxy/API timing; [methodology](docs/BENCHMARKING.md) |
 

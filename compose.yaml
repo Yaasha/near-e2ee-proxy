@@ -1,6 +1,6 @@
 services:
   proxy:
-    image: near-e2ee-proxy:local
+    image: ${PROXY_IMAGE:-near-e2ee-proxy:local}
     build: .
     restart: unless-stopped
     ports:

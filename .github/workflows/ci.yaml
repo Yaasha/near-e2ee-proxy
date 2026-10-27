@@ -5,13 +5,19 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never interrupt an in-flight registry write. PR validation remains cancellable.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   check:
@@ -54,3 +60,105 @@ jobs:
       - run: mise run container-test
         env:
           CONTAINER_ARCH: ${{ matrix.arch }}
+
+  publish:
+    needs: [check, containers]
+    if: >-
+      github.repository == 'Yaasha/near-e2ee-proxy' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.check.result == 'success' && needs.containers.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    # All future stable-release writers must use this same lock. Do not cancel
+    # registry writes or use separate per-event/per-tag publication locks.
+    concurrency:
+      group: ghcr-publication
+      cancel-in-progress: false
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      VALIDATION_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: 2026.9.15
+          install: false
+          cache: false
+      - run: mise --locked install
+      - name: Check trusted source, validation results and current main
+        run: mise exec -- go run ./internal/distribution gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cache-binary: false
+          buildkitd-flags: ''
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Creation timestamp
+        id: metadata
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build the validated immutable source and publish its source tag
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: https://github.com/Yaasha/near-e2ee-proxy.git#${{ github.sha }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/yaasha/near-e2ee-proxy:sha-${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.title=NEAR E2EE Proxy
+            org.opencontainers.image.description=Verified model-key E2EE Chat Completions proxy
+            org.opencontainers.image.source=https://github.com/Yaasha/near-e2ee-proxy
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
+      - name: Inspect registry attachments and promote current main
+        run: |
+          mise exec -- go run ./internal/distribution promote "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo 'The sha tag identifies source; the digest identifies this exact image index, including attachments. Publication does not deploy the service.' >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+
+  public-pull:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    # This job has no registry login and cannot write packages. A first private
+    # publication fails here until its owner explicitly makes the package public.
+    env:
+      IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Anonymous digest pull and isolated CLI smoke check
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          image="ghcr.io/yaasha/near-e2ee-proxy@$IMAGE_DIGEST"
+          docker pull --platform "linux/$ARCH" "$image"
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --platform "linux/$ARCH" "$image" -help
+          echo "Anonymous linux/$ARCH pull and isolated CLI check passed for $image" >> "$GITHUB_STEP_SUMMARY"

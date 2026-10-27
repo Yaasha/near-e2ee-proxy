@@ -126,7 +126,7 @@ with the pinned SDK and runtime, not live inference in the container. Existing
 live-model results in the compatibility document are separate. No live inference
 or paid request is part of these checks.
 
-CI runs on main pushes and opened, synchronized, reopened or ready-for-review PRs.
+CI runs on main pushes, manual dispatch and opened, synchronized, reopened or ready-for-review PRs.
 The validation job runs `mise run lint` and the existing `mise run check`; it
 reports formatting errors without rewriting source. Separate `ubuntu-24.04` and
 `ubuntu-24.04-arm` jobs build and execute AMD64/ARM64 images on native runners,
@@ -134,7 +134,7 @@ rather than treating cross-compilation as runtime evidence. Jobs have bounded
 execution times, `contents: read`, no application secrets, no package-write
 permissions and no registry login/publication. PR code runs under `pull_request`,
 without a privileged `pull_request_target` context. Caches are not shared by the
-mise action. Automated GHCR publication remains follow-up work.
+mise action. Successful trusted main runs can then publish as described below.
 
 For an explicit single-platform local build, use:
 
@@ -169,3 +169,132 @@ also version-pinned. Updating a pin requires reviewing the upstream change,
 refreshing relevant lock checksums/digests and rerunning the matching checks.
 These pins and tests do not constitute an independent security audit or runtime
 approval of NEAR's deployment.
+
+## Development images on GHCR
+
+The CI workflow publishes `ghcr.io/yaasha/near-e2ee-proxy` for Linux AMD64 and
+ARM64. `:main` follows successfully validated current main; `:sha-<full-commit>`
+identifies the source commit. A rerun can produce a different artifact for the
+same source (for example, creation timestamps or scanner output can change).
+Use `@sha256:<index-digest>` to identify an exact image index and its attachments.
+There is no `latest` tag or stable semantic-version release automation yet.
+
+The Go checks, pinned workflow/Dockerfile linters, and both native architecture
+container jobs must all succeed before publication. The publication job checks
+the repository, event, ref, checkout and current main revision before registry
+login. PRs, forks, tags and manual dispatches on other branches cannot publish.
+Only that job receives `packages: write`; login uses the automatically supplied
+short-lived `GITHUB_TOKEN`, with no separate registry secret. No application key
+or inference is involved. The build uses an immutable Git context at the validated
+commit, with the same pinned Dockerfile/compiler/dependencies as the runtime tests.
+
+Publication jobs share the `ghcr-publication` concurrency group and are never
+cancelled by a newer run. A future stable-release publisher must share this same
+lock. GitHub does not guarantee queued run order, so the command rechecks main
+immediately before promoting the inspected digest to `:main`. A stale run fails
+without moving that tag; if main advances during the build, a source tag may have
+been published, but promotion is refused. A new commit arriving just after the
+last check can temporarily leave main pointing to the prior validated revision;
+the shared lock prevents an older writer from overwriting a newer publication.
+
+Each platform has OCI title, description, source repository, full revision,
+`sha-<commit>` version, MIT license and UTC creation-time labels. The source label
+and workflow token associate the GHCR package with this repository. BuildKit
+attaches maximum-detail SLSA provenance and an SPDX SBOM per platform. Before
+promotion, `internal/distribution` reads the actual registry configs and attachment
+contents, checks both architectures and labels, matches provenance Git material
+to the expected revision, and requires nonempty SPDX packages. A missing,
+inconsistent or unreadable attachment fails the job. The job summary records the
+published tags and exact index digest. These build records support source and
+dependency inspection; they do not independently audit or approve NEAR's live
+runtime, deployment controls or remote egress. The existing authentication,
+model-key E2EE, model receipts and provisional-streaming tradeoff remain unchanged.
+
+To build manually, open this repository's **Actions → CI → Run workflow**, select
+`main`, and run without inputs. It uses all the same validation/publication gates.
+For a CLI equivalent, use:
+
+```sh
+gh workflow run ci.yaml --repo Yaasha/near-e2ee-proxy --ref main
+```
+
+Branch dispatches run validation but cannot publish. Review the
+publication and both `public-pull` job summaries before treating a run as evidence.
+
+### First-publication visibility
+
+A public source repository is insufficient evidence of an anonymously readable
+package. After the first successful publication, the package owner must open
+[the package](https://github.com/users/Yaasha/packages/container/package/near-e2ee-proxy),
+check its repository association, and use **Package settings → Danger Zone →
+Change visibility → Public**, confirming the package name. GitHub documents that
+making a package public cannot be reversed. This administrative action is not
+performed by the publication workflow. See
+[GitHub's package visibility instructions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+
+The separate `public-pull` jobs have read-only permissions and no login. They use
+an empty Docker configuration, pull the published digest on both native Linux
+architectures, and run `-help` with networking disabled, read-only filesystem and
+reduced privileges. Private packages fail this check even when the publisher can
+read them. After changing visibility, rerun the failed public-pull jobs on that
+same run to verify the original digest without rebuilding. A missing hosted run,
+failed publication, private package or failed anonymous pull remains unresolved;
+local fixture tests alone do not establish public distribution.
+
+For local anonymous inspection (substitute the digest from a successful summary):
+
+```sh
+image='ghcr.io/yaasha/near-e2ee-proxy@sha256:<index-digest>'
+anonymous_config=$(mktemp -d)
+DOCKER_CONFIG="$anonymous_config" docker pull --platform linux/amd64 "$image"
+DOCKER_CONFIG="$anonymous_config" docker pull --platform linux/arm64 "$image"
+rm -rf "$anonymous_config"
+docker buildx imagetools inspect "$image"
+docker buildx imagetools inspect "$image" --format '{{json .Provenance}}'
+docker buildx imagetools inspect "$image" --format '{{json .SBOM}}'
+```
+
+These inspection commands follow [Docker's attestation format and inspection
+documentation](https://docs.docker.com/build/metadata/attestations/).
+
+### Deliberate Compose updates
+
+Publication never deploys or restarts a service. Review the source change,
+validation summaries, labels and attachments; record the chosen digest and retain
+the previous digest for rollback. With the required runtime keys supplied through
+your process environment, update explicitly:
+
+```sh
+export PROXY_IMAGE='ghcr.io/yaasha/near-e2ee-proxy@sha256:<reviewed-index-digest>'
+docker compose --env-file /dev/null pull --policy always proxy
+docker compose --env-file /dev/null up -d --no-build --pull never proxy
+docker compose --env-file /dev/null ps
+docker compose --env-file /dev/null exec proxy /near-e2ee-proxy -healthcheck
+```
+
+The image override retains all Compose hardening and environment-only settings.
+`--no-build` is required for distribution use because the same Compose file also
+supports local builds. To roll back, select the prior digest and repeat these
+commands. The health probe checks local liveness only; perform authenticated
+readiness deliberately when needed. Omit `PROXY_IMAGE` for the local build flow.
+
+### Weekly infrastructure updates
+
+Dependabot proposes GitHub Actions and Docker base updates every Monday at 09:00
+Europe/London. It updates action commit pins, including the publication actions,
+and Docker digests through reviewable PRs. Automatic merging is disabled in the
+repository and no auto-merge workflow is configured. No `gomod` updater is enabled.
+The `golang` rule ignores semantic-version updates while allowing digest refreshes
+at the pinned compiler version; intentional Go-version changes must reconcile
+`mise.toml`, `mise.lock`, `go.mod` and the build base together. The existing
+compiler-drift gate rejects inconsistent base proposals before dependency download.
+NEAR SDK and verification-policy changes remain manual.
+
+Infrastructure update PRs use the same unprivileged lint, Go and both-platform
+container gates as every other PR. Review upstream changes, action runtimes,
+base-image contents/digests and licenses before merging; verify publication and
+anonymous-pull summaries after the merge. Maintenance regressions run with the
+repository's pinned Go through `mise run distribution-test` (also included in
+`mise run check`); workflow and Dockerfile linting use the existing mise-locked
+linters. Dependabot is GitHub-hosted; there is no unpinned local maintenance CLI
+or application dependency change.

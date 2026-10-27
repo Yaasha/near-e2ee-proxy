@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    # Refresh the pinned compiler image's digest, never its compiler version.
+    # A deliberate Go update must reconcile mise.toml, mise.lock and go.mod.
+    ignore:
+      - dependency-name: golang
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
+# No gomod updater or auto-merge workflow: NEAR SDK/policy updates are manual.

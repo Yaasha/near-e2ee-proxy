@@ -104,6 +104,14 @@ container health check. See [container operations](CONTAINERS.md) for trusted TL
 termination/tunnel guidance and the validation limits. Container hardening does
 not change the trusted-host, deployment-control, E2EE or receipt assumptions above.
 
+Development image publication adds OCI source/revision labels, build provenance
+and an SBOM, inspected from GHCR before main-tag promotion. Build provenance
+describes the image build; it does not independently approve NEAR's live software,
+deployment/update controls or outbound-network policy. Anonymous pull jobs prove
+registry distribution and isolated CLI startup only. Operators review a digest
+and update deliberately; publication does not deploy a running service. See
+[image distribution](CONTAINERS.md#development-images-on-ghcr).
+
 The project has not undergone an independent security audit. It does not
 promise protection against invasive physical attacks, undisclosed hardware bugs,
 malicious trusted software, compromised clients/proxy hosts, or all metadata

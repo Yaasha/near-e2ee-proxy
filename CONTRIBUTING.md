@@ -21,9 +21,13 @@ someone learning Go, especially around validation and verification boundaries.
 
 GitHub Actions runs these validation gates on main pushes and opened, updated or
 reopened PRs. CI checks formatting without changing submitted files. Separate
-native AMD64/ARM64 jobs build and run the container regressions. These jobs have
-read-only repository permissions and receive no application credentials; they
-neither log into GHCR nor publish images.
+native AMD64/ARM64 jobs build and run the container regressions. Validation jobs
+have read-only repository permissions and receive no application credentials.
+PRs never log into GHCR or publish images. Trusted current-main push and manual
+runs publish development images only after all validation succeeds; only the
+serialized publication job has package-write permission. Anonymous pull checks
+then run separately for both architectures. See
+[distribution](docs/CONTAINERS.md#development-images-on-ghcr).
 
 For container changes, run `CONTAINER_ARCH=amd64 mise run container-test` and
 `CONTAINER_ARCH=arm64 mise run container-test`. Docker must support running the

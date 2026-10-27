@@ -14,8 +14,8 @@ packages or global tool versions. Application dependencies belong in `go.mod`.
   copying code from other projects. Do not automatically upgrade dependencies.
 - Keep manual test pages, diagnostic spikes and generated reports out of the
   repository. Maintain repeatable regression tests alongside the source instead.
-- Keep changes scoped. Responses and automated image publication are not currently
-  implemented; do not add them as incidental cleanup or claim they are available.
+- Keep changes scoped. Responses and stable semantic-version releases are not
+  currently implemented; do not add them as incidental cleanup or claim they are available.
 
 ## Credentials and live testing
 

@@ -31,6 +31,11 @@ description = "Build and test a hardened container; requires Docker (CONTAINER_A
 depends = ["toolchain"]
 run = "go test -tags=container ./internal/container -count=1 -timeout=20m -v"
 
+[tasks.distribution-test]
+description = "Offline publication eligibility, stale-run and registry artifact regressions"
+depends = ["toolchain"]
+run = "go test ./internal/distribution -count=1"
+
 [tasks.fmt]
 description = "Format Go source files in place"
 run = "gofmt -w cmd internal"

@@ -1,0 +1,39 @@
+{
+  "manifest": {
+    "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "manifests": [
+      {"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","platform":{"os":"linux","architecture":"amd64"}},
+      {"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","platform":{"os":"linux","architecture":"arm64"}},
+      {"platform":{"os":"unknown","architecture":"unknown"},"annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+      {"platform":{"os":"unknown","architecture":"unknown"},"annotations":{"vnd.docker.reference.type":"attestation-manifest","vnd.docker.reference.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+    ]
+  },
+  "images": {
+    "linux/amd64": {"config":{"Labels":{
+      "org.opencontainers.image.title":"NEAR E2EE Proxy",
+      "org.opencontainers.image.description":"Verified model-key E2EE Chat Completions proxy",
+      "org.opencontainers.image.source":"https://github.com/Yaasha/near-e2ee-proxy",
+      "org.opencontainers.image.revision":"1111111111111111111111111111111111111111",
+      "org.opencontainers.image.version":"sha-1111111111111111111111111111111111111111",
+      "org.opencontainers.image.licenses":"MIT",
+      "org.opencontainers.image.created":"2026-10-27T22:00:00Z"
+    }}},
+    "linux/arm64": {"config":{"Labels":{
+      "org.opencontainers.image.title":"NEAR E2EE Proxy",
+      "org.opencontainers.image.description":"Verified model-key E2EE Chat Completions proxy",
+      "org.opencontainers.image.source":"https://github.com/Yaasha/near-e2ee-proxy",
+      "org.opencontainers.image.revision":"1111111111111111111111111111111111111111",
+      "org.opencontainers.image.version":"sha-1111111111111111111111111111111111111111",
+      "org.opencontainers.image.licenses":"MIT",
+      "org.opencontainers.image.created":"2026-10-27T22:00:00Z"
+    }}}
+  },
+  "provenance": {
+    "linux/amd64":{"SLSA":{"buildType":"https://mobyproject.org/buildkit@v1","materials":[{"uri":"https://github.com/Yaasha/near-e2ee-proxy.git","digest":{"sha1":"1111111111111111111111111111111111111111"}}]}},
+    "linux/arm64":{"SLSA":{"buildType":"https://mobyproject.org/buildkit@v1","materials":[{"uri":"https://github.com/Yaasha/near-e2ee-proxy.git","digest":{"sha1":"1111111111111111111111111111111111111111"}}]}}
+  },
+  "sbom": {
+    "linux/amd64":{"SPDX":{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","packages":[{"name":"near-e2ee-proxy"}]}},
+    "linux/arm64":{"SPDX":{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","packages":[{"name":"near-e2ee-proxy"}]}}
+  }
+}
