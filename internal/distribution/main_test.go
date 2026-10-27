@@ -31,7 +31,15 @@ func fixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, script := range map[string]string{
-		"gh":  "#!/bin/sh\nif [ -f \"$FIXTURE_HEAD_FILE\" ]; then cat \"$FIXTURE_HEAD_FILE\"; else printf '%s\\n' \"$FIXTURE_HEAD\"; fi\n",
+		"gh": `#!/bin/sh
+if [ "$2" = users/Yaasha/packages/container/near-e2ee-proxy ]; then
+  cat "$FIXTURE_PACKAGE"
+elif [ -f "$FIXTURE_HEAD_FILE" ]; then
+  cat "$FIXTURE_HEAD_FILE"
+else
+  printf '%s\n' "$FIXTURE_HEAD"
+fi
+`,
 		"git": "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_CHECKOUT\"\n",
 		"docker": `#!/bin/sh
 if [ "$3" = create ]; then
@@ -62,6 +70,10 @@ fi
 	t.Setenv("FIXTURE_CHECKOUT", revision)
 	t.Setenv("FIXTURE_WRITES", filepath.Join(dir, "writes"))
 	t.Setenv("FIXTURE_REGISTRY", filepath.Join(dir, "registry.json"))
+	t.Setenv("FIXTURE_PACKAGE", filepath.Join(dir, "package.json"))
+	if os.WriteFile(os.Getenv("FIXTURE_PACKAGE"), []byte(`{"visibility":"public","repository":{"full_name":"Yaasha/near-e2ee-proxy"}}`), 0600) != nil {
+		t.Fatal("write package fixture")
+	}
 	return dir
 }
 
@@ -183,5 +195,25 @@ func TestMainPromotion(t *testing.T) {
 				t.Fatalf("main must reference the inspected digest: %s", output)
 			}
 		})
+	}
+}
+
+func TestPackageMustBePublicAndLinkedBeforePromotion(t *testing.T) {
+	for _, data := range []string{
+		`{"visibility":"private","repository":{"full_name":"Yaasha/near-e2ee-proxy"}}`,
+		`{"visibility":"public","repository":{"full_name":"another/repository"}}`,
+		`{"visibility":"public","repository":null}`,
+		`not json`,
+	} {
+		fixture(t)
+		registry, _ := os.ReadFile("testdata/registry.json")
+		if os.WriteFile(os.Getenv("FIXTURE_REGISTRY"), registry, 0600) != nil || os.WriteFile(os.Getenv("FIXTURE_PACKAGE"), []byte(data), 0600) != nil {
+			t.Fatal("write fixtures")
+		}
+		_, err := command("promote", digest)
+		_, writeErr := os.Stat(os.Getenv("FIXTURE_WRITES"))
+		if err == nil || !os.IsNotExist(writeErr) {
+			t.Fatal("unreadable, private or unlinked package must block main-tag promotion")
+		}
 	}
 }

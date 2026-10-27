@@ -29,8 +29,8 @@
     }}}
   },
   "provenance": {
-    "linux/amd64":{"SLSA":{"buildType":"https://mobyproject.org/buildkit@v1","materials":[{"uri":"https://github.com/Yaasha/near-e2ee-proxy.git","digest":{"sha1":"1111111111111111111111111111111111111111"}}]}},
-    "linux/arm64":{"SLSA":{"buildType":"https://mobyproject.org/buildkit@v1","materials":[{"uri":"https://github.com/Yaasha/near-e2ee-proxy.git","digest":{"sha1":"1111111111111111111111111111111111111111"}}]}}
+    "linux/amd64":{"SLSA":{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","resolvedDependencies":[{"uri":"https://github.com/Yaasha/near-e2ee-proxy.git#1111111111111111111111111111111111111111","digest":{"sha1":"1111111111111111111111111111111111111111"}}]}}},
+    "linux/arm64":{"SLSA":{"buildDefinition":{"buildType":"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md","resolvedDependencies":[{"uri":"https://github.com/Yaasha/near-e2ee-proxy.git#1111111111111111111111111111111111111111","digest":{"sha1":"1111111111111111111111111111111111111111"}}]}}}
   },
   "sbom": {
     "linux/amd64":{"SPDX":{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","packages":[{"name":"near-e2ee-proxy"}]}},

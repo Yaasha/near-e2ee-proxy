@@ -58,6 +58,21 @@ func promote(ctx context.Context, digest string) error {
 	if err := verify(ctx, os.Getenv("GITHUB_SHA"), digest); err != nil {
 		return err
 	}
+	// Use only the workflow's package token, never a separate long-lived key.
+	// Public source alone is insufficient: confirm GHCR's actual package state.
+	data, err := output(ctx, "gh", "api", "users/Yaasha/packages/container/near-e2ee-proxy")
+	if err != nil {
+		return err
+	}
+	var pkg struct {
+		Visibility string
+		Repository struct {
+			FullName string `json:"full_name"`
+		}
+	}
+	if json.Unmarshal(data, &pkg) != nil || pkg.Visibility != "public" || pkg.Repository.FullName != repository {
+		return errors.New("GHCR package must be public and linked to the source repository before main promotion")
+	}
 	// The workflow holds the shared publication concurrency lock. Check again
 	// immediately before the mutable write: inspection may have taken minutes.
 	// A later publisher cannot run concurrently and an older rerun fails here.
@@ -72,6 +87,7 @@ func promote(ctx context.Context, digest string) error {
 		return errors.New("main tag does not match the inspected digest")
 	}
 	fmt.Printf("Published %s:main and %s:sha-%s\nImage digest: %s\n", image, image, os.Getenv("GITHUB_SHA"), digest)
+	fmt.Println("Verified linux/amd64 and linux/arm64 metadata, SLSA v1 provenance and SPDX SBOM. GHCR package is public and linked to " + repository + ".")
 	return nil
 }
 
@@ -115,10 +131,12 @@ type registryImage struct {
 	}
 	Provenance map[string]struct {
 		SLSA struct {
-			BuildType string
-			Materials []struct {
-				URI    string
-				Digest map[string]string
+			BuildDefinition struct {
+				BuildType            string
+				ResolvedDependencies []struct {
+					URI    string
+					Digest map[string]string
+				}
 			}
 		}
 	}
@@ -189,15 +207,15 @@ func verify(ctx context.Context, revision, digest string) error {
 		if _, err := time.Parse(time.RFC3339, labels["org.opencontainers.image.created"]); err != nil {
 			return fmt.Errorf("invalid %s creation timestamp", platform)
 		}
-		provenance := result.Provenance[platform].SLSA
+		provenance := result.Provenance[platform].SLSA.BuildDefinition
 		boundSource := false
-		for _, material := range provenance.Materials {
+		for _, material := range provenance.ResolvedDependencies {
 			uri, _, _ := strings.Cut(strings.TrimPrefix(material.URI, "git+"), "#")
 			if uri == source+".git" && material.Digest["sha1"] == revision {
 				boundSource = true
 			}
 		}
-		if provenance.BuildType != "https://mobyproject.org/buildkit@v1" || !boundSource {
+		if provenance.BuildType != "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md" || !boundSource {
 			return fmt.Errorf("missing %s provenance for expected source", platform)
 		}
 		sbom := result.SBOM[platform].SPDX

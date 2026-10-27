@@ -117,7 +117,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/yaasha/near-e2ee-proxy:sha-${{ github.sha }}
-          provenance: mode=max
+          provenance: mode=max,version=v1
           sbom: true
           labels: |
             org.opencontainers.image.title=NEAR E2EE Proxy

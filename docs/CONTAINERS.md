@@ -200,11 +200,14 @@ the shared lock prevents an older writer from overwriting a newer publication.
 Each platform has OCI title, description, source repository, full revision,
 `sha-<commit>` version, MIT license and UTC creation-time labels. The source label
 and workflow token associate the GHCR package with this repository. BuildKit
-attaches maximum-detail SLSA provenance and an SPDX SBOM per platform. Before
+attaches maximum-detail SLSA v1 provenance and an SPDX SBOM per platform. Before
 promotion, `internal/distribution` reads the actual registry configs and attachment
 contents, checks both architectures and labels, matches provenance Git material
 to the expected revision, and requires nonempty SPDX packages. A missing,
-inconsistent or unreadable attachment fails the job. The job summary records the
+inconsistent or unreadable attachment fails the job. Using its automatically
+supplied token, the command also reads GHCR's package metadata through `gh` and
+requires public visibility and the correct repository association before promotion.
+The job summary records the
 published tags and exact index digest. These build records support source and
 dependency inspection; they do not independently audit or approve NEAR's live
 runtime, deployment controls or remote egress. The existing authentication,
@@ -224,7 +227,8 @@ publication and both `public-pull` job summaries before treating a run as eviden
 ### First-publication visibility
 
 A public source repository is insufficient evidence of an anonymously readable
-package. After the first successful publication, the package owner must open
+package. Workflow-created packages can inherit repository access; test anonymous
+pulls to establish the actual result. If the first package is private, its owner must open
 [the package](https://github.com/users/Yaasha/packages/container/package/near-e2ee-proxy),
 check its repository association, and use **Package settings → Danger Zone →
 Change visibility → Public**, confirming the package name. GitHub documents that
@@ -232,12 +236,13 @@ making a package public cannot be reversed. This administrative action is not
 performed by the publication workflow. See
 [GitHub's package visibility instructions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
 
-The separate `public-pull` jobs have read-only permissions and no login. They use
+Once main promotion succeeds, the separate `public-pull` jobs have read-only permissions and no login. They use
 an empty Docker configuration, pull the published digest on both native Linux
 architectures, and run `-help` with networking disabled, read-only filesystem and
 reduced privileges. Private packages fail this check even when the publisher can
-read them. After changing visibility, rerun the failed public-pull jobs on that
-same run to verify the original digest without rebuilding. A missing hosted run,
+read them. A private or unlinked package blocks promotion; after correcting its
+settings, rerun the failed publication job to inspect and promote an eligible
+current-main build, followed by anonymous pulls. A missing hosted run,
 failed publication, private package or failed anonymous pull remains unresolved;
 local fixture tests alone do not establish public distribution.
 
