@@ -11,12 +11,26 @@ mise trust mise.toml
 mise --locked install
 mise run fmt
 mise run check
+mise run lint
 ```
 
 The check command runs formatting validation, `go vet`, race-enabled offline tests,
 a build and an HTTP smoke test. It needs no API keys and makes no paid requests.
 Use the pinned compiler and dependency versions. Keep source comments helpful to
 someone learning Go, especially around validation and verification boundaries.
+
+GitHub Actions runs these validation gates on main pushes and opened, updated or
+reopened PRs. CI checks formatting without changing submitted files. Separate
+native AMD64/ARM64 jobs build and run the container regressions. These jobs have
+read-only repository permissions and receive no application credentials; they
+neither log into GHCR nor publish images.
+
+For container changes, run `CONTAINER_ARCH=amd64 mise run container-test` and
+`CONTAINER_ARCH=arm64 mise run container-test`. Docker must support running the
+selected Linux architecture, natively or through explicit emulation (Docker
+Desktop includes it). These tests create temporary synthetic contexts and use
+synthetic environment credentials, not real env files or inference. See
+[container validation](docs/CONTAINERS.md#validation-and-ci) for coverage and pins.
 
 Add tests for changed behavior, including relevant rejection paths. Use synthetic
 fixtures; never put real prompts, tool results, credentials or captured SDK errors

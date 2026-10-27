@@ -22,7 +22,17 @@ import (
 
 func main() {
 	generate := flag.Bool("generate-key", false, "print a fresh 256-bit proxy bearer token and exit")
+	health := flag.Bool("healthcheck", false, "check local /healthz within two seconds and exit without credentials")
 	flag.Parse()
+	if flag.NArg() != 0 || (*generate && *health) {
+		log.Fatal("unexpected arguments; use -help")
+	}
+	if *health {
+		if !healthy() {
+			os.Exit(1)
+		}
+		return
+	}
 	if *generate {
 		var key [32]byte
 		if _, err := rand.Read(key[:]); err != nil {
@@ -30,9 +40,6 @@ func main() {
 		}
 		fmt.Println(hex.EncodeToString(key[:]))
 		return
-	}
-	if flag.NArg() != 0 {
-		log.Fatal("unexpected arguments; use -help")
 	}
 	config, err := proxy.LoadConfig()
 	if err != nil {

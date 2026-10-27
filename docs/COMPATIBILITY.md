@@ -116,6 +116,14 @@ and elapsed/cancelled request contexts 504 where the connection is still writabl
 
 ## What was actually tested
 
+Container regression tests run the built Linux AMD64 and ARM64 images with
+synthetic credentials, a non-root user, read-only filesystem, dropped capabilities
+and no privilege escalation. They cover local HTTP reachability, health probes,
+credential/authentication rejection, listener overrides and SIGTERM exit. The
+runtime contains a static Go binary, CA certificates and timezone material.
+These checks make no live inference request; they do not add tested client or
+model compatibility. See [container operations](CONTAINERS.md).
+
 Live `Qwen/Qwen3.8-27B` checks cover JSON text, incremental SSE with usage, a streamed
 native function call, and assistant/tool history continuation. Every successful answer
 passed real CPU/GPU verification, E2EE and model-receipt verification. The suite

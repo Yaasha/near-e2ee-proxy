@@ -1,0 +1,14 @@
+# Allow only named build inputs. In particular no env files, Git metadata,
+# local mise overrides, caches, binaries, secret mounts or arbitrary local files.
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!mise.toml
+!mise.lock
+!tools/check-go.sh
+!cmd/near-e2ee-proxy/*.go
+!internal/proxy/*.go
+!internal/near/*.go
+**/*_test.go
