@@ -20,6 +20,7 @@ func TestCommandHelper(t *testing.T) {
 	for i, arg := range os.Args {
 		if arg == "--" {
 			os.Args = append([]string{"distribution"}, os.Args[i+1:]...)
+			installRegistryFixture()
 			main()
 			os.Exit(0)
 		}
@@ -40,7 +41,14 @@ else
   printf '%s\n' "$FIXTURE_HEAD"
 fi
 `,
-		"git": "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_CHECKOUT\"\n",
+		"git": `#!/bin/sh
+case "$1" in
+  fetch) exit "${FIXTURE_FETCH_EXIT:-0}" ;;
+  merge-base) exit "${FIXTURE_ANCESTRY_EXIT:-0}" ;;
+  rev-parse)
+    if [ "$2" = 'FETCH_HEAD^{commit}' ]; then printf '%s\n' "$FIXTURE_TAG_COMMIT"; else printf '%s\n' "$FIXTURE_CHECKOUT"; fi ;;
+esac
+`,
 		"docker": `#!/bin/sh
 if [ "$3" = create ]; then
   printf '%s\n' "$*" >> "$FIXTURE_WRITES"
@@ -58,6 +66,7 @@ fi
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("DISTRIBUTION_TEST_COMMAND", "1")
+	t.Setenv("GITHUB_STEP_SUMMARY", filepath.Join(dir, "summary"))
 	t.Setenv("GITHUB_EVENT_NAME", "push")
 	t.Setenv("GITHUB_REPOSITORY", "Yaasha/near-e2ee-proxy")
 	t.Setenv("GITHUB_REF", "refs/heads/main")
@@ -68,6 +77,9 @@ fi
 	t.Setenv("FIXTURE_AFTER_INSPECT_HEAD", "")
 	t.Setenv("FIXTURE_DIGEST", digest)
 	t.Setenv("FIXTURE_CHECKOUT", revision)
+	t.Setenv("FIXTURE_TAG_COMMIT", revision)
+	t.Setenv("FIXTURE_ANCESTRY_EXIT", "0")
+	t.Setenv("FIXTURE_FETCH_EXIT", "0")
 	t.Setenv("FIXTURE_WRITES", filepath.Join(dir, "writes"))
 	t.Setenv("FIXTURE_REGISTRY", filepath.Join(dir, "registry.json"))
 	t.Setenv("FIXTURE_PACKAGE", filepath.Join(dir, "package.json"))
@@ -100,7 +112,7 @@ func TestPublicationEligibility(t *testing.T) {
 		{"other event", "GITHUB_EVENT_NAME", "workflow_run", false},
 		{"release", "GITHUB_EVENT_NAME", "release", false},
 		{"branch", "GITHUB_REF", "refs/heads/feature", false},
-		{"tag", "GITHUB_REF", "refs/tags/v1.0.0", false},
+		{"tag", "GITHUB_REF", "refs/tags/v1.0.0", true},
 		{"fork", "GITHUB_REPOSITORY", "someone/near-e2ee-proxy", false},
 		{"wrong checkout", "FIXTURE_CHECKOUT", strings.Repeat("2", 40), false},
 		{"stale run", "FIXTURE_HEAD", strings.Repeat("2", 40), false},
@@ -215,5 +227,47 @@ func TestPackageMustBePublicAndLinkedBeforePromotion(t *testing.T) {
 		if err == nil || !os.IsNotExist(writeErr) {
 			t.Fatal("unreadable, private or unlinked package must block main-tag promotion")
 		}
+	}
+}
+
+func TestReleaseSourceEligibility(t *testing.T) {
+	for _, test := range []struct {
+		name, event, ref, setting, value string
+		allowed                          bool
+	}{
+		{"stable push", "push", "refs/tags/v1.2.3", "", "", true},
+		{"prerelease push", "push", "refs/tags/v1.2.3-rc.1", "", "", true},
+		{"manual outside main", "workflow_dispatch", "refs/tags/v1.2.3", "FIXTURE_ANCESTRY_EXIT", "1", false},
+		{"manual malformed", "workflow_dispatch", "refs/tags/v01.2.3", "", "", false},
+		{"manual failed validation", "workflow_dispatch", "refs/tags/v1.2.3", "VALIDATION_RESULTS", `{}`, false},
+		{"manual tag", "workflow_dispatch", "refs/tags/v1.2.3", "", "", true},
+		{"PR tag", "pull_request", "refs/tags/v1.2.3", "", "", false},
+		{"missing prefix", "push", "refs/tags/1.2.3", "", "", false},
+		{"build metadata", "push", "refs/tags/v1.2.3+build.1", "", "", false},
+		{"empty prerelease", "push", "refs/tags/v1.2.3-", "", "", false},
+		{"empty identifier", "push", "refs/tags/v1.2.3-rc..1", "", "", false},
+		{"non ASCII", "push", "refs/tags/v1.2.3-ré", "", "", false},
+		{"extra component", "push", "refs/tags/v1.2.3.4", "", "", false},
+		{"overlong", "push", "refs/tags/v1.2.3-" + strings.Repeat("a", 125), "", "", false},
+		{"incomplete", "push", "refs/tags/v1.2", "", "", false},
+		{"leading zero", "push", "refs/tags/v01.2.3", "", "", false},
+		{"prerelease leading zero", "push", "refs/tags/v1.2.3-rc.01", "", "", false},
+		{"outside main", "push", "refs/tags/v1.2.3", "FIXTURE_ANCESTRY_EXIT", "1", false},
+		{"moved tag", "push", "refs/tags/v1.2.3", "FIXTURE_TAG_COMMIT", strings.Repeat("2", 40), false},
+		{"source unavailable", "push", "refs/tags/v1.2.3", "FIXTURE_FETCH_EXIT", "1", false},
+		{"failed validation", "push", "refs/tags/v1.2.3", "VALIDATION_RESULTS", `{}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture(t)
+			t.Setenv("GITHUB_EVENT_NAME", test.event)
+			t.Setenv("GITHUB_REF", test.ref)
+			if test.setting != "" {
+				t.Setenv(test.setting, test.value)
+			}
+			out, err := command("gate")
+			if (err == nil) != test.allowed {
+				t.Fatalf("allowed=%v want %v: %s", err == nil, test.allowed, out)
+			}
+		})
 	}
 }

@@ -1,4 +1,4 @@
-// Command distribution guards development image publication and inspects GHCR.
+// Command distribution guards image publication and inspects GHCR.
 // It is CI tooling, excluded from the application's container build context.
 package main
 
@@ -22,15 +22,30 @@ var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		if path := os.Getenv("GITHUB_STEP_SUMMARY"); path != "" {
+			if summary, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); openErr == nil {
+				fmt.Fprintf(summary, "Publication refused: %s\n", err)
+				summary.Close()
+			}
+		}
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string) error {
+	if len(args) == 1 && args[0] == "prepare" {
+		return prepare(ctx)
+	}
+	if len(args) == 2 && args[0] == "recover" {
+		if err := gate(ctx); err != nil {
+			return err
+		}
+		return promoteRelease(ctx, args[1], true)
+	}
 	if len(args) == 1 && args[0] == "gate" {
 		if err := gate(ctx); err != nil {
 			return err
@@ -48,30 +63,21 @@ func run(ctx context.Context, args []string) error {
 	if len(args) == 2 && args[0] == "promote" {
 		return promote(ctx, args[1])
 	}
-	return errors.New("usage: distribution gate | verify <revision> <digest> | promote <digest>")
+	return errors.New("usage: distribution gate | prepare | verify <revision> <digest> | promote <digest> | recover <digest>")
 }
 
 func promote(ctx context.Context, digest string) error {
 	if err := gate(ctx); err != nil {
 		return err
 	}
+	if strings.HasPrefix(os.Getenv("GITHUB_REF"), "refs/tags/") {
+		return promoteRelease(ctx, digest, false)
+	}
 	if err := verify(ctx, os.Getenv("GITHUB_SHA"), digest); err != nil {
 		return err
 	}
-	// Use only the workflow's package token, never a separate long-lived key.
-	// Public source alone is insufficient: confirm GHCR's actual package state.
-	data, err := output(ctx, "gh", "api", "users/Yaasha/packages/container/near-e2ee-proxy")
-	if err != nil {
+	if err := publicPackage(ctx); err != nil {
 		return err
-	}
-	var pkg struct {
-		Visibility string
-		Repository struct {
-			FullName string `json:"full_name"`
-		}
-	}
-	if json.Unmarshal(data, &pkg) != nil || pkg.Visibility != "public" || pkg.Repository.FullName != repository {
-		return errors.New("GHCR package must be public and linked to the source repository before main promotion")
 	}
 	// The workflow holds the shared publication concurrency lock. Check again
 	// immediately before the mutable write: inspection may have taken minutes.
@@ -91,12 +97,31 @@ func promote(ctx context.Context, digest string) error {
 	return nil
 }
 
+func publicPackage(ctx context.Context) error {
+	// Use only the workflow's package token, never a separate long-lived key.
+	// Public source alone is insufficient: confirm GHCR's actual package state.
+	data, err := output(ctx, "gh", "api", "users/Yaasha/packages/container/near-e2ee-proxy")
+	if err != nil {
+		return err
+	}
+	var pkg struct {
+		Visibility string
+		Repository struct {
+			FullName string `json:"full_name"`
+		}
+	}
+	if json.Unmarshal(data, &pkg) != nil || pkg.Visibility != "public" || pkg.Repository.FullName != repository {
+		return errors.New("GHCR package must be public and linked to the source repository before promotion")
+	}
+	return nil
+}
+
 func gate(ctx context.Context) error {
-	if os.Getenv("GITHUB_REPOSITORY") != repository || os.Getenv("GITHUB_REF") != "refs/heads/main" || !commitPattern.MatchString(os.Getenv("GITHUB_SHA")) {
-		return errors.New("publication requires trusted main source")
+	if os.Getenv("GITHUB_REPOSITORY") != repository || !commitPattern.MatchString(os.Getenv("GITHUB_SHA")) {
+		return errors.New("publication requires trusted repository and source revision")
 	}
 	if event := os.Getenv("GITHUB_EVENT_NAME"); event != "push" && event != "workflow_dispatch" {
-		return errors.New("event cannot publish development images")
+		return errors.New("event cannot publish images")
 	}
 	var checks map[string]struct{ Result string }
 	if json.Unmarshal([]byte(os.Getenv("VALIDATION_RESULTS")), &checks) != nil || checks["check"].Result != "success" || checks["containers"].Result != "success" {
@@ -106,8 +131,39 @@ func gate(ctx context.Context) error {
 	if err != nil || strings.TrimSpace(string(checkout)) != os.Getenv("GITHUB_SHA") {
 		return errors.New("checkout does not match validated source")
 	}
+	ref := os.Getenv("GITHUB_REF")
+	if ref != "refs/heads/main" {
+		if !strings.HasPrefix(ref, "refs/tags/") {
+			return errors.New("publication requires main or a version tag")
+		}
+		if _, err := releaseVersion(strings.TrimPrefix(ref, "refs/tags/")); err != nil {
+			return err
+		}
+		// Fetch the current remote ref and peel annotated tags. Never label an
+		// artifact with an event revision when its tag now resolves elsewhere.
+		if _, err := output(ctx, "git", "fetch", "--no-tags", "origin", ref); err != nil {
+			return err
+		}
+		tagged, err := output(ctx, "git", "rev-parse", "FETCH_HEAD^{commit}")
+		if err != nil || strings.TrimSpace(string(tagged)) != os.Getenv("GITHUB_SHA") {
+			return errors.New("release tag no longer matches validated source")
+		}
+	}
 	head, err := output(ctx, "gh", "api", "repos/"+repository+"/git/ref/heads/main", "--jq", ".object.sha")
-	if err != nil || strings.TrimSpace(string(head)) != os.Getenv("GITHUB_SHA") {
+	if err != nil || !commitPattern.MatchString(strings.TrimSpace(string(head))) {
+		return errors.New("main cannot be checked")
+	}
+	if ref != "refs/heads/main" {
+		main := strings.TrimSpace(string(head))
+		if _, err := output(ctx, "git", "fetch", "--no-tags", "origin", main); err != nil {
+			return err
+		}
+		if _, err := output(ctx, "git", "merge-base", "--is-ancestor", os.Getenv("GITHUB_SHA"), main); err != nil {
+			return errors.New("release commit must be reachable from main")
+		}
+		return nil
+	}
+	if strings.TrimSpace(string(head)) != os.Getenv("GITHUB_SHA") {
 		return errors.New("main has advanced or cannot be checked; refusing stale publication")
 	}
 	return nil
@@ -150,16 +206,35 @@ type registryImage struct {
 }
 
 func verify(ctx context.Context, revision, digest string) error {
-	if !commitPattern.MatchString(revision) || !digestPattern.MatchString(digest) {
-		return errors.New("expected a full source revision and sha256 image digest")
+	return verifyVersion(ctx, revision, digest, "sha-"+revision)
+}
+
+func inspect(ctx context.Context, digest string) (registryImage, error) {
+	var result registryImage
+	if !digestPattern.MatchString(digest) {
+		return result, errors.New("invalid image digest")
 	}
 	data, err := output(ctx, "docker", "buildx", "imagetools", "inspect", image+"@"+digest, "--format", inspection)
 	if err != nil {
+		return result, err
+	}
+	if json.Unmarshal(data, &result) != nil || result.Manifest.Digest != digest {
+		return result, errors.New("registry returned invalid image metadata")
+	}
+	return result, nil
+}
+
+func verifyVersion(ctx context.Context, revision, digest, version string) error {
+	result, err := inspect(ctx, digest)
+	if err != nil {
 		return err
 	}
-	var result registryImage
-	if json.Unmarshal(data, &result) != nil || result.Manifest.Digest != digest {
-		return errors.New("registry returned invalid image metadata")
+	return verifyArtifact(result, revision, version)
+}
+
+func verifyArtifact(result registryImage, revision, version string) error {
+	if !commitPattern.MatchString(revision) {
+		return errors.New("expected a full source revision")
 	}
 	platforms := map[string]bool{}
 	for _, manifest := range result.Manifest.Manifests {
@@ -198,7 +273,7 @@ func verify(ctx context.Context, revision, digest string) error {
 		labels := result.Images[platform].Config.Labels
 		for name, value := range map[string]string{
 			"title": "NEAR E2EE Proxy", "description": "Verified model-key E2EE Chat Completions proxy",
-			"source": source, "revision": revision, "version": "sha-" + revision, "licenses": "MIT",
+			"source": source, "revision": revision, "version": version, "licenses": "MIT",
 		} {
 			if labels["org.opencontainers.image."+name] != value {
 				return fmt.Errorf("incorrect %s %s label", platform, name)

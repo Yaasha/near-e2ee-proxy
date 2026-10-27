@@ -5,8 +5,8 @@ NEAR AI's official SDK for verified, end-to-end encrypted inference.
 
 Supports text JSON, incremental encrypted SSE, native function calls and encrypted
 tool-result continuation, with hardened Linux AMD64/ARM64 container packaging and
-GitHub validation CI, and development image publication to GHCR. Responses and
-stable semantic-version releases are not currently included.
+GitHub validation CI, and guarded development and versioned image publication to
+GHCR. Responses is not currently included.
 
 The local host is trusted. The proxy also trusts NEAR's deployment and
 update controls. It verifies CPU/GPU evidence and model-response signatures, but
@@ -95,7 +95,10 @@ separate authenticated check. See [container operations and CI](docs/CONTAINERS.
 for build/test commands, key setup, shutdown behavior and deliberate remote access.
 Validated development images are published as
 `ghcr.io/yaasha/near-e2ee-proxy:main` and `:sha-<full-commit>` for Linux AMD64/ARM64.
-Pin an exact digest for deployment; publication does not update running services.
+Version tags publish preserved full-version images; stable releases can advance
+minor aliases and `latest` without moving them backwards. See the
+[release procedure](docs/CONTAINERS.md#versioned-releases). Pin an exact digest
+for deployment; publication does not update running services.
 See [distribution and deliberate updates](docs/CONTAINERS.md#development-images-on-ghcr),
 including the first-publication visibility requirement and anonymous-pull checks.
 
