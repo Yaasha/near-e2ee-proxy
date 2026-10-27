@@ -7,21 +7,22 @@ go = "1.27.3"
 GOTOOLCHAIN = "local"
 
 [tasks.dev]
-description = "Compile and run Hello World"
+description = "Run the proxy with mise loading development configuration from .env"
+env._.file = { path = ".env", redact = true }
 run = "go run ./cmd/near-e2ee-proxy"
 
 [tasks.build]
-description = "Build the executable into bin/"
-run = "go build -o bin/near-e2ee-proxy ./cmd/near-e2ee-proxy"
+description = "Build the proxy into bin/"
+run = "go build -o bin/ ./cmd/..."
 
 [tasks.fmt]
 description = "Format Go source files in place"
-run = "gofmt -w cmd"
+run = "gofmt -w cmd internal"
 
 [tasks.format-check]
 description = "Check Go formatting without changing files"
 run = '''
-unformatted="$(gofmt -l cmd)"
+unformatted="$(gofmt -l cmd internal)"
 if [ -n "$unformatted" ]; then
   printf 'Run mise run fmt to format these files:\n%s\n' "$unformatted" >&2
   exit 1
@@ -33,20 +34,27 @@ description = "Check Go code for common mistakes"
 run = "go vet ./..."
 
 [tasks.test]
-description = "Run Go tests (unit tests will arrive with stage two)"
-run = "go test ./..."
+description = "Run offline Go tests with the race detector"
+run = "go test -race ./..."
 
 [tasks.smoke]
-description = "Check that the built executable prints the expected greeting"
+description = "Check the built command and run the HTTP smoke test"
 depends = ["build"]
 run = '''
-output="$(./bin/near-e2ee-proxy)"
-if [ "$output" != 'Hello, world!' ]; then
-  printf 'Hello World smoke check failed: unexpected output.\n' >&2
-  exit 1
-fi
+./bin/near-e2ee-proxy -help
+go test ./internal/proxy -run '^TestHTTPServerSmoke$' -count=1
 '''
+
+[tasks.live]
+description = "Run four bounded paid Chat HTTP checks using the development key"
+env = { NEAR_LIVE_TEST = "1", _.file = { path = ".env", redact = true } }
+run = "go test -tags=live ./internal/proxy -run '^TestLiveChatProxy$' -count=1 -v"
 
 [tasks.check]
 description = "Run formatting, vet, tests, build and executable smoke checks"
 depends = ["format-check", "vet", "test", "smoke"]
+
+[tasks.benchmark]
+description = "Compare the real proxy and NEAR API: ten synthetic requests, at most 256 output tokens each"
+env = { NEAR_BENCHMARK = "1", NEAR_BENCHMARK_OUTPUT = "{{config_root}}/.cache/benchmarks/latest.json", _.file = { path = ".env", redact = true } }
+run = "go test -tags=benchmark ./internal/near -run '^TestProxyBenchmark$' -count=1 -timeout=7m -v"
