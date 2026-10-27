@@ -8,8 +8,6 @@ services:
     environment:
       NEAR_AI_API_KEY: ${NEAR_AI_API_KEY:?Supply NEAR_AI_API_KEY in the process environment}
       PROXY_API_KEY: ${PROXY_API_KEY:?Supply a separate PROXY_API_KEY in the process environment}
-      LISTEN_ADDR: 0.0.0.0:8080
-      MODELS: ${MODELS:-Qwen/Qwen3.8-27B}
     read_only: true
     cap_drop:
       - ALL

@@ -101,7 +101,7 @@ Images are built locally; automated GHCR publication is follow-up work.
 | --- | --- |
 | `NEAR_AI_API_KEY` | Outbound NEAR Cloud credential |
 | `PROXY_API_KEY` | Inbound shared token, 32–256 non-whitespace ASCII characters |
-| `LISTEN_ADDR` | Default `127.0.0.1:8080` |
+| `LISTEN_ADDR` | Default `127.0.0.1:8080` for the standalone binary; `0.0.0.0:8080` in the image |
 | `MODELS` | Models advertised by `/v1/models` and probed by `/readyz`; default `Qwen/Qwen3.8-27B`; at most eight |
 
 `MODELS` is a discovery/readiness list, not an allowlist. Authenticated requests

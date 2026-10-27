@@ -25,15 +25,18 @@ passes the two required settings into the process; the application continues to
 read only environment variables. No credential is a build argument, image default
 or file mount. Proxy tokens must be 32–256 non-whitespace ASCII characters and
 differ from the nonempty, single-line ASCII NEAR token. Missing, malformed or equal
-keys fail at startup with fixed messages. `MODELS` optionally sets the existing
-discovery/readiness list; it remains independent of per-request model selection.
+keys fail at startup with fixed messages. Each inference request selects its own
+canonical model, which must pass the existing verification checks. `MODELS` only
+customizes the discovery/readiness list when explicitly supplied through
+`docker run --env MODELS` or a Compose override; it does not restrict requests.
 
 The image runs UID/GID 65532 and listens on `0.0.0.0:8080` inside the container.
 The standalone binary retains its loopback default. `LISTEN_ADDR` overrides still
 work with `docker run --env LISTEN_ADDR=0.0.0.0:9090`; publish the corresponding
-container port deliberately. The Compose example fixes its internal listener and
-publishes `127.0.0.1:8080:8080`, uses a read-only root filesystem, drops all
-capabilities, sets `no-new-privileges`, and bounds process count. It needs no
+container port deliberately. The Compose example inherits the image's listener
+default and the application's discovery/readiness default; only credentials are
+required. It publishes `127.0.0.1:8080:8080`, uses a read-only root filesystem,
+drops all capabilities, sets `no-new-privileges`, and bounds process count. It needs no
 writable volume or temporary filesystem for startup and local HTTP operation.
 
 For a direct run equivalent to the default Compose setup:

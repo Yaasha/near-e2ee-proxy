@@ -303,7 +303,8 @@ func writeFile(t *testing.T, path string, data []byte) {
 func TestComposeConfiguration(t *testing.T) {
 	t.Setenv("NEAR_AI_API_KEY", nearKey)
 	t.Setenv("PROXY_API_KEY", proxyKey)
-	t.Setenv("MODELS", "")
+	t.Setenv("MODELS", "synthetic-host-model")
+	t.Setenv("LISTEN_ADDR", "127.0.0.1:9099")
 	// Explicitly disable Compose's automatic dotenv loading. No real env file
 	// or secret mount is read, even when the caller has development state.
 	data := mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
@@ -328,7 +329,12 @@ func TestComposeConfiguration(t *testing.T) {
 	if service.Restart != "unless-stopped" || !service.ReadOnly || service.StopGracePeriod != "15s" || strings.Join(service.CapDrop, ",") != "ALL" || strings.Join(service.SecurityOpt, ",") != "no-new-privileges:true" || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Target != 8080 {
 		t.Fatal("Compose must preserve loopback publishing, shutdown and runtime hardening")
 	}
-	if service.Environment["NEAR_AI_API_KEY"] != nearKey || service.Environment["PROXY_API_KEY"] != proxyKey || service.Environment["LISTEN_ADDR"] != "0.0.0.0:8080" {
-		t.Fatal("Compose must supply credentials at runtime and listen inside the container")
+	if service.Environment["NEAR_AI_API_KEY"] != nearKey || service.Environment["PROXY_API_KEY"] != proxyKey {
+		t.Fatal("Compose must supply credentials at runtime")
+	}
+	for _, setting := range []string{"LISTEN_ADDR", "MODELS"} {
+		if _, exists := service.Environment[setting]; exists {
+			t.Fatal("Compose must rely on image and application defaults for optional settings")
+		}
 	}
 }
