@@ -1,14 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +15,7 @@ import (
 
 type registryFixture struct {
 	sync.Mutex
+	*commandFixture
 	tags      map[string]string
 	artifacts map[string][]byte
 	writes    []string
@@ -23,7 +23,7 @@ type registryFixture struct {
 	bodies    map[string]string
 }
 
-// Replace only the external HTTP boundary in the CLI subprocess, never its
+// Replace only the external HTTP boundary in the command instance, never its
 // policy. No production registry URL override or test mode is introduced.
 type fixtureTransport struct{ target *url.URL }
 
@@ -36,46 +36,14 @@ func (f fixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return (&http.Transport{Proxy: nil, DisableKeepAlives: true}).RoundTrip(r)
 }
 
-func TestReleaseDockerHelper(t *testing.T) {
-	if os.Getenv("RELEASE_DOCKER_HELPER") != "1" {
-		return
-	}
-	args := os.Args
-	for len(args) > 0 && args[0] != "--" {
-		args = args[1:]
-	}
-	args = args[1:]
-	endpoint := ""
-	if len(args) >= 6 && args[2] == "create" {
-		tag := strings.TrimPrefix(args[4], image+":")
-		d := strings.TrimPrefix(args[5], image+"@")
-		endpoint = "/write?tag=" + url.QueryEscape(tag) + "&digest=" + url.QueryEscape(d)
-	} else if len(args) >= 6 && args[2] == "inspect" {
-		d := strings.TrimPrefix(args[3], image+"@")
-		endpoint = "/artifact/" + d
-	} else {
-		os.Exit(2)
-	}
-	resp, err := http.Get(os.Getenv("FIXTURE_REGISTRY_URL") + endpoint)
-	if err != nil {
-		os.Exit(2)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		os.Exit(2)
-	}
-	io.Copy(os.Stdout, resp.Body)
-	os.Exit(0)
-}
-
 func releaseFixture(t *testing.T, tag string) *registryFixture {
 	t.Helper()
-	dir := fixture(t)
-	t.Setenv("GITHUB_REF", "refs/tags/"+tag)
-	t.Setenv("GITHUB_ACTOR", "synthetic-actor")
-	t.Setenv("GH_TOKEN", "synthetic-workflow-token")
-	t.Setenv("RECOVER_DIGEST", "")
-	state := &registryFixture{tags: map[string]string{}, artifacts: map[string][]byte{}, faults: map[string]int{}, bodies: map[string]string{}}
+	f := fixture(t)
+	f.setenv("GITHUB_REF", "refs/tags/"+tag)
+	f.setenv("GITHUB_ACTOR", "synthetic-actor")
+	f.setenv("GH_TOKEN", "synthetic-workflow-token")
+	f.setenv("RECOVER_DIGEST", "")
+	state := &registryFixture{commandFixture: f, tags: map[string]string{}, artifacts: map[string][]byte{}, faults: map[string]int{}, bodies: map[string]string{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state.Lock()
 		defer state.Unlock()
@@ -112,31 +80,48 @@ func releaseFixture(t *testing.T, tag string) *registryFixture {
 				w.WriteHeader(404)
 				fmt.Fprint(w, `{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`)
 			}
-		case r.URL.Path == "/write":
-			tag, d := r.URL.Query().Get("tag"), r.URL.Query().Get("digest")
-			if status := state.faults["write:"+tag]; status != 0 {
-				w.WriteHeader(status)
-				return
-			}
-			state.tags[tag] = d
-			state.writes = append(state.writes, tag)
-		case strings.HasPrefix(r.URL.Path, "/artifact/"):
-			data := state.artifacts[strings.TrimPrefix(r.URL.Path, "/artifact/")]
-			if data == nil {
-				w.WriteHeader(404)
-				return
-			}
-			w.Write(data)
 		default:
 			w.WriteHeader(500)
 		}
 	}))
 	t.Cleanup(server.Close)
-	t.Setenv("FIXTURE_REGISTRY_URL", server.URL)
-	t.Setenv("RELEASE_DOCKER_HELPER", "1")
-	t.Setenv("FIXTURE_TEST_BINARY", os.Args[0])
-	if os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexec \"$FIXTURE_TEST_BINARY\" -test.run=^TestReleaseDockerHelper$ -- \"$@\"\n"), 0700) != nil {
-		t.Fatal("write Docker boundary")
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.app.registry.Transport = fixtureTransport{target: target}
+	baseOutput := f.app.command
+	f.app.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			return baseOutput(ctx, name, args...)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(args) != 6 || args[0] != "buildx" || args[1] != "imagetools" {
+			return nil, errors.New("unexpected Docker command")
+		}
+		state.Lock()
+		defer state.Unlock()
+		if args[2] == "create" && args[3] == "--tag" {
+			tag := strings.TrimPrefix(args[4], image+":")
+			d := strings.TrimPrefix(args[5], image+"@")
+			if state.faults["write:"+tag] != 0 {
+				return nil, errors.New("docker command failed")
+			}
+			state.tags[tag] = d
+			state.writes = append(state.writes, tag)
+			return nil, nil
+		}
+		if args[2] == "inspect" && args[4] == "--format" && args[5] == inspection {
+			d := strings.TrimPrefix(args[3], image+"@")
+			data, ok := state.artifacts[d]
+			if !ok {
+				return nil, errors.New("docker command failed")
+			}
+			return append([]byte(nil), data...), nil
+		}
+		return nil, errors.New("unexpected Docker command")
 	}
 	addArtifact(t, state, strings.TrimPrefix(tag, "v"), digest)
 	return state
@@ -175,7 +160,7 @@ func (s *registryFixture) changeArtifact(d, from, to string) {
 
 func TestStableReleasePublication(t *testing.T) {
 	state := releaseFixture(t, "v1.2.3")
-	out, err := command("promote", digest)
+	out, err := state.command("promote", digest)
 	if err != nil {
 		t.Fatalf("release must publish: %s", out)
 	}
@@ -187,30 +172,19 @@ func TestStableReleasePublication(t *testing.T) {
 	}
 }
 
-// Used by the helper process before entering the actual CLI.
-func installRegistryFixture() {
-	if raw := os.Getenv("FIXTURE_REGISTRY_URL"); raw != "" {
-		target, err := url.Parse(raw)
-		if err != nil {
-			panic(err)
-		}
-		registryHTTP.Transport = fixtureTransport{target}
-	}
-}
-
 func TestReleaseRetryAndRecovery(t *testing.T) {
 	state := releaseFixture(t, "v1.2.3")
 	state.setTag("1.2.3", digest)
-	out, err := command("promote", digest)
+	out, err := state.command("promote", digest)
 	if err == nil || !strings.Contains(string(out), "replacement refused") || len(state.written()) != 0 {
 		t.Fatalf("retry must refuse replacement: %s", out)
 	}
-	summary, readErr := os.ReadFile(os.Getenv("GITHUB_STEP_SUMMARY"))
+	summary, readErr := os.ReadFile(state.getenv("GITHUB_STEP_SUMMARY"))
 	if readErr != nil || !strings.Contains(string(summary), "replacement refused") {
 		t.Fatal("refused replacement must explain itself in the workflow summary")
 	}
-	t.Setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
-	out, err = command("recover", digest)
+	state.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+	out, err = state.command("recover", digest)
 	if err != nil || strings.Join(state.written(), ",") != "1.2,latest" {
 		t.Fatalf("recovery must only repair aliases: %s; %v", out, state.written())
 	}
@@ -248,7 +222,7 @@ func TestReleaseAliasOrdering(t *testing.T) {
 				state.setTag("2.0.0-rc.1", oldDigest)
 				addArtifact(t, state, "2.0.0-rc.1", oldDigest)
 			}
-			out, err := command("promote", digest)
+			out, err := state.command("promote", digest)
 			if err != nil || strings.Join(state.written(), ",") != tc.want {
 				t.Fatalf("writes=%v want %s: %s", state.written(), tc.want, out)
 			}
@@ -276,7 +250,7 @@ func TestUncertainRegistryStateNeverPublishes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			state := releaseFixture(t, "v1.2.3")
 			state.setFault(tc.path, tc.status, tc.body)
-			out, err := command("promote", digest)
+			out, err := state.command("promote", digest)
 			if err == nil || len(state.written()) != 0 {
 				t.Fatalf("uncertain state must block all writes: %s", out)
 			}
@@ -295,7 +269,7 @@ func TestReleaseArtifactsAndStableAliasIntegrity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			state := releaseFixture(t, "v1.2.3")
 			state.changeArtifact(digest, tc.from, tc.to)
-			out, err := command("promote", digest)
+			out, err := state.command("promote", digest)
 			if err == nil || len(state.written()) != 0 {
 				t.Fatalf("invalid release artifact must block publication: %s", out)
 			}
@@ -308,7 +282,7 @@ func TestReleaseArtifactsAndStableAliasIntegrity(t *testing.T) {
 			addArtifact(t, state, bad, d)
 			state.setTag("1.2", d)
 			state.setTag(bad, d)
-			out, err := command("promote", digest)
+			out, err := state.command("promote", digest)
 			if err == nil || len(state.written()) != 0 {
 				t.Fatalf("untrusted alias metadata must block writes: %s", out)
 			}
@@ -324,14 +298,14 @@ func TestSerializedOutOfOrderAndDuplicateReleases(t *testing.T) {
 			// Model either possible order under the workflow's shared publication lock.
 			// Workflow configuration tests separately enforce that every writer holds it.
 			for _, tag := range order {
-				t.Setenv("GITHUB_REF", "refs/tags/"+tag)
+				state.setenv("GITHUB_REF", "refs/tags/"+tag)
 				d := digest
 				if tag == "v1.2.9" {
 					d = "sha256:" + strings.Repeat("a", 64)
 				}
 				addArtifact(t, state, strings.TrimPrefix(tag, "v"), d)
 				before := len(state.written())
-				out, err := command("promote", d)
+				out, err := state.command("promote", d)
 				if seen[tag] {
 					if err == nil || len(state.written()) != before {
 						t.Fatal("duplicate must never replace full version")
@@ -367,11 +341,11 @@ func TestPrepareReleaseBuildOrRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			state := releaseFixture(t, "v1.2.3")
 			state.setTag("1.2.3", tc.existing)
-			t.Setenv("RECOVER_DIGEST", tc.recovery)
-			t.Setenv("GITHUB_EVENT_NAME", tc.event)
-			t.Setenv("GITHUB_RUN_ID", "123")
-			t.Setenv("GITHUB_RUN_ATTEMPT", "2")
-			out, err := command("prepare")
+			state.setenv("RECOVER_DIGEST", tc.recovery)
+			state.setenv("GITHUB_EVENT_NAME", tc.event)
+			state.setenv("GITHUB_RUN_ID", "123")
+			state.setenv("GITHUB_RUN_ATTEMPT", "2")
+			out, err := state.command("prepare")
 			if (err == nil) != tc.allowed {
 				t.Fatalf("allowed=%v want %v: %s", err == nil, tc.allowed, out)
 			}
@@ -404,9 +378,7 @@ func TestConcurrentPublishersUnderWorkflowLock(t *testing.T) {
 			if tag == "v1.2.9" {
 				d = older
 			}
-			cmd := exec.Command(os.Args[0], "-test.run=^TestCommandHelper$", "--", "promote", d)
-			cmd.Env = append(os.Environ(), "GITHUB_REF=refs/tags/"+tag)
-			out, err := cmd.CombinedOutput()
+			out, err := state.commandForRef("refs/tags/"+tag, "promote", d)
 			if err != nil {
 				failures <- string(out)
 			}
@@ -436,22 +408,22 @@ func TestConcurrentPublishersUnderWorkflowLock(t *testing.T) {
 func TestInterruptedPublicationRecoversWithoutReplacingRelease(t *testing.T) {
 	state := releaseFixture(t, "v1.2.3")
 	state.setFault("write:latest", 500, "")
-	out, err := command("promote", digest)
+	out, err := state.command("promote", digest)
 	if err == nil || state.tag("1.2.3") != digest || state.tag("1.2") != digest || state.tag("latest") != "" {
 		t.Fatalf("expected partial publication: %s", out)
 	}
 	before := len(state.written())
-	out, err = command("promote", digest)
+	out, err = state.command("promote", digest)
 	if err == nil || len(state.written()) != before {
 		t.Fatalf("retry must refuse replacement: %s", out)
 	}
 	state.setFault("write:latest", 0, "")
-	t.Setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
-	out, err = command("recover", digest)
+	state.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+	out, err = state.command("recover", digest)
 	if err != nil || strings.Join(state.written(), ",") != "1.2.3,1.2,latest" {
 		t.Fatalf("recovery must only write missing alias: %s", out)
 	}
-	out, err = command("recover", digest)
+	out, err = state.command("recover", digest)
 	if err != nil || strings.Join(state.written(), ",") != "1.2.3,1.2,latest" {
 		t.Fatalf("repeated recovery must not write tags: %s", out)
 	}
@@ -459,12 +431,12 @@ func TestInterruptedPublicationRecoversWithoutReplacingRelease(t *testing.T) {
 
 func TestExistingPrereleaseCannotBeRebuilt(t *testing.T) {
 	state := releaseFixture(t, "v1.3.0-rc.1")
-	if out, err := command("promote", digest); err != nil {
+	if out, err := state.command("promote", digest); err != nil {
 		t.Fatalf("new prerelease must publish: %s", out)
 	}
 	for _, event := range []string{"push", "workflow_dispatch"} {
-		t.Setenv("GITHUB_EVENT_NAME", event)
-		out, err := command("promote", digest)
+		state.setenv("GITHUB_EVENT_NAME", event)
+		out, err := state.command("promote", digest)
 		if err == nil || !strings.Contains(string(out), "replacement refused") || strings.Join(state.written(), ",") != "1.3.0-rc.1" {
 			t.Fatalf("existing prerelease must stay preserved: %s", out)
 		}
@@ -479,9 +451,29 @@ func TestRecoveryPreservesInterveningNewerRelease(t *testing.T) {
 	for _, tag := range []string{"1.2.10", "1.2", "latest"} {
 		state.setTag(tag, newer)
 	}
-	t.Setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
-	out, err := command("recover", digest)
+	state.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+	out, err := state.command("recover", digest)
 	if err != nil || len(state.written()) != 0 || state.tag("1.2") != newer || state.tag("latest") != newer || state.tag("1.2.3") != digest {
 		t.Fatalf("recovery must preserve all published versions and newer aliases: %s", out)
+	}
+}
+
+func TestCommandInstancesKeepIndependentDependencies(t *testing.T) {
+	allowed := releaseFixture(t, "v1.2.3")
+	rejected := releaseFixture(t, "v1.2.3")
+	rejected.setenv("GH_TOKEN", "synthetic-invalid-token")
+	type result struct {
+		output []byte
+		err    error
+	}
+	good, bad := make(chan result, 1), make(chan result, 1)
+	go func() { out, err := allowed.command("promote", digest); good <- result{out, err} }()
+	go func() { out, err := rejected.command("promote", digest); bad <- result{out, err} }()
+	success, failure := <-good, <-bad
+	if success.err != nil || len(allowed.written()) != 3 {
+		t.Fatalf("valid instance failed: %s", success.output)
+	}
+	if failure.err == nil || !strings.Contains(string(failure.output), "registry authentication failed") || len(rejected.written()) != 0 {
+		t.Fatalf("invalid instance used another instance's dependencies: %s", failure.output)
 	}
 }

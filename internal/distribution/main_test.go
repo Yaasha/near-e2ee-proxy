@@ -1,101 +1,149 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const revision = "1111111111111111111111111111111111111111"
 const digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
-// Run the real CLI entry point in a subprocess. Only the external GitHub,
-// Git and Docker commands are replaced; ordinary tests never contact a service.
-func TestCommandHelper(t *testing.T) {
-	if os.Getenv("DISTRIBUTION_TEST_COMMAND") != "1" {
-		return
-	}
-	for i, arg := range os.Args {
-		if arg == "--" {
-			os.Args = append([]string{"distribution"}, os.Args[i+1:]...)
-			installRegistryFixture()
-			main()
-			os.Exit(0)
-		}
-	}
-	os.Exit(2)
+type commandFixture struct {
+	app *distribution
+	env map[string]string
+	dir string
 }
 
-func fixture(t *testing.T) string {
+type offlineTransport struct{}
+
+func (offlineTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected registry request")
+}
+
+// Exercise the command dispatcher, validation and reporting in process. Only
+// external Git/GitHub/Docker commands and HTTP are replaced with synthetic data.
+func fixture(t *testing.T) *commandFixture {
 	t.Helper()
 	dir := t.TempDir()
-	for name, script := range map[string]string{
-		"gh": `#!/bin/sh
-if [ "$2" = users/Yaasha/packages/container/near-e2ee-proxy ]; then
-  cat "$FIXTURE_PACKAGE"
-elif [ -f "$FIXTURE_HEAD_FILE" ]; then
-  cat "$FIXTURE_HEAD_FILE"
-else
-  printf '%s\n' "$FIXTURE_HEAD"
-fi
-`,
-		"git": `#!/bin/sh
-case "$1" in
-  fetch) exit "${FIXTURE_FETCH_EXIT:-0}" ;;
-  merge-base) exit "${FIXTURE_ANCESTRY_EXIT:-0}" ;;
-  rev-parse)
-    if [ "$2" = 'FETCH_HEAD^{commit}' ]; then printf '%s\n' "$FIXTURE_TAG_COMMIT"; else printf '%s\n' "$FIXTURE_CHECKOUT"; fi ;;
-esac
-`,
-		"docker": `#!/bin/sh
-if [ "$3" = create ]; then
-  printf '%s\n' "$*" >> "$FIXTURE_WRITES"
-elif [ "$6" = '{{.Manifest.Digest}}' ]; then
-  printf '%s\n' "$FIXTURE_DIGEST"
-else
-  cat "$FIXTURE_REGISTRY"
-  if [ -n "$FIXTURE_AFTER_INSPECT_HEAD" ]; then printf '%s\n' "$FIXTURE_AFTER_INSPECT_HEAD" > "$FIXTURE_HEAD_FILE"; fi
-fi
-`,
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
-			t.Fatal(err)
-		}
+	f := &commandFixture{app: newDistribution(), dir: dir, env: map[string]string{
+		"GITHUB_STEP_SUMMARY": filepath.Join(dir, "summary"),
+		"GITHUB_EVENT_NAME":   "push", "GITHUB_REPOSITORY": repository,
+		"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": revision,
+		"VALIDATION_RESULTS": `{"check":{"result":"success"},"containers":{"result":"success"}}`,
+		"FIXTURE_HEAD":       revision, "FIXTURE_HEAD_FILE": filepath.Join(dir, "head"),
+		"FIXTURE_DIGEST": digest, "FIXTURE_CHECKOUT": revision, "FIXTURE_TAG_COMMIT": revision,
+		"FIXTURE_ANCESTRY_EXIT": "0", "FIXTURE_FETCH_EXIT": "0",
+		"FIXTURE_WRITES": filepath.Join(dir, "writes"), "FIXTURE_REGISTRY": filepath.Join(dir, "registry.json"),
+		"FIXTURE_PACKAGE": filepath.Join(dir, "package.json"),
+	}}
+	f.app.getenv = f.getenv
+	f.app.command = f.output
+	f.app.registry.Transport = offlineTransport{}
+	if err := os.WriteFile(f.getenv("FIXTURE_PACKAGE"), []byte(`{"visibility":"public","repository":{"full_name":"Yaasha/near-e2ee-proxy"}}`), 0600); err != nil {
+		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("DISTRIBUTION_TEST_COMMAND", "1")
-	t.Setenv("GITHUB_STEP_SUMMARY", filepath.Join(dir, "summary"))
-	t.Setenv("GITHUB_EVENT_NAME", "push")
-	t.Setenv("GITHUB_REPOSITORY", "Yaasha/near-e2ee-proxy")
-	t.Setenv("GITHUB_REF", "refs/heads/main")
-	t.Setenv("GITHUB_SHA", revision)
-	t.Setenv("VALIDATION_RESULTS", `{"check":{"result":"success"},"containers":{"result":"success"}}`)
-	t.Setenv("FIXTURE_HEAD", revision)
-	t.Setenv("FIXTURE_HEAD_FILE", filepath.Join(dir, "head"))
-	t.Setenv("FIXTURE_AFTER_INSPECT_HEAD", "")
-	t.Setenv("FIXTURE_DIGEST", digest)
-	t.Setenv("FIXTURE_CHECKOUT", revision)
-	t.Setenv("FIXTURE_TAG_COMMIT", revision)
-	t.Setenv("FIXTURE_ANCESTRY_EXIT", "0")
-	t.Setenv("FIXTURE_FETCH_EXIT", "0")
-	t.Setenv("FIXTURE_WRITES", filepath.Join(dir, "writes"))
-	t.Setenv("FIXTURE_REGISTRY", filepath.Join(dir, "registry.json"))
-	t.Setenv("FIXTURE_PACKAGE", filepath.Join(dir, "package.json"))
-	if os.WriteFile(os.Getenv("FIXTURE_PACKAGE"), []byte(`{"visibility":"public","repository":{"full_name":"Yaasha/near-e2ee-proxy"}}`), 0600) != nil {
-		t.Fatal("write package fixture")
-	}
-	return dir
+	return f
 }
 
-func command(args ...string) ([]byte, error) {
-	return exec.Command(os.Args[0], append([]string{"-test.run=^TestCommandHelper$", "--"}, args...)...).CombinedOutput()
+func (f *commandFixture) getenv(name string) string { return f.env[name] }
+func (f *commandFixture) setenv(name, value string) { f.env[name] = value }
+
+func (f *commandFixture) command(args ...string) ([]byte, error) { return f.invoke(*f.app, args...) }
+
+func (f *commandFixture) commandForRef(ref string, args ...string) ([]byte, error) {
+	app := *f.app
+	app.getenv = func(name string) string {
+		if name == "GITHUB_REF" {
+			return ref
+		}
+		return f.getenv(name)
+	}
+	return f.invoke(app, args...)
+}
+
+func (f *commandFixture) invoke(app distribution, args ...string) ([]byte, error) {
+	var result bytes.Buffer
+	app.stdout, app.stderr = &result, &result
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := app.execute(ctx, args)
+	return result.Bytes(), err
+}
+
+func (f *commandFixture) output(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch name {
+	case "gh":
+		if len(args) == 2 && args[0] == "api" && args[1] == "users/Yaasha/packages/container/near-e2ee-proxy" {
+			return os.ReadFile(f.getenv("FIXTURE_PACKAGE"))
+		}
+		if len(args) == 4 && args[0] == "api" && args[1] == "repos/"+repository+"/git/ref/heads/main" && args[2] == "--jq" && args[3] == ".object.sha" {
+			if data, err := os.ReadFile(f.getenv("FIXTURE_HEAD_FILE")); err == nil {
+				return data, nil
+			}
+			return []byte(f.getenv("FIXTURE_HEAD") + "\n"), nil
+		}
+	case "git":
+		switch {
+		case len(args) == 2 && args[0] == "rev-parse" && args[1] == "HEAD":
+			return []byte(f.getenv("FIXTURE_CHECKOUT") + "\n"), nil
+		case len(args) == 2 && args[0] == "rev-parse" && args[1] == "FETCH_HEAD^{commit}":
+			return []byte(f.getenv("FIXTURE_TAG_COMMIT") + "\n"), nil
+		case len(args) == 4 && args[0] == "fetch" && args[1] == "--no-tags" && args[2] == "origin":
+			if f.getenv("FIXTURE_FETCH_EXIT") != "0" {
+				return nil, errors.New("git command failed")
+			}
+			return nil, nil
+		case len(args) == 4 && args[0] == "merge-base" && args[1] == "--is-ancestor" && args[2] == f.getenv("GITHUB_SHA") && args[3] == f.getenv("FIXTURE_HEAD"):
+			if f.getenv("FIXTURE_ANCESTRY_EXIT") != "0" {
+				return nil, errors.New("git command failed")
+			}
+			return nil, nil
+		}
+	case "docker":
+		if len(args) != 6 || args[0] != "buildx" || args[1] != "imagetools" {
+			break
+		}
+		if args[2] == "create" && args[3] == "--tag" {
+			file, err := os.OpenFile(f.getenv("FIXTURE_WRITES"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				return nil, err
+			}
+			defer file.Close()
+			_, err = file.WriteString(strings.Join(args, " ") + "\n")
+			return nil, err
+		}
+		if args[2] == "inspect" && args[4] == "--format" {
+			if args[5] == "{{.Manifest.Digest}}" {
+				return []byte(f.getenv("FIXTURE_DIGEST") + "\n"), nil
+			}
+			if args[5] != inspection {
+				break
+			}
+			data, err := os.ReadFile(f.getenv("FIXTURE_REGISTRY"))
+			if head := f.getenv("FIXTURE_AFTER_INSPECT_HEAD"); head != "" {
+				if err := os.WriteFile(f.getenv("FIXTURE_HEAD_FILE"), []byte(head), 0600); err != nil {
+					return nil, err
+				}
+			}
+			return data, err
+		}
+	}
+	return nil, errors.New("unexpected external command")
 }
 
 func TestTrustedMainCanPublish(t *testing.T) {
-	fixture(t)
-	output, err := command("gate")
+	f := fixture(t)
+	output, err := f.command("gate")
 	if err != nil || strings.TrimSpace(string(output)) != "eligible" {
 		t.Fatalf("trusted validated current main must be eligible: %s", output)
 	}
@@ -125,13 +173,13 @@ func TestPublicationEligibility(t *testing.T) {
 		{"invalid checks", "VALIDATION_RESULTS", `not json`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			dir := fixture(t)
-			t.Setenv(test.setting, test.value)
-			_, err := command("gate")
+			f := fixture(t)
+			f.setenv(test.setting, test.value)
+			_, err := f.command("gate")
 			if (err == nil) != test.allowed {
 				t.Fatalf("publication allowed=%v, want %v", err == nil, test.allowed)
 			}
-			if _, err := os.Stat(filepath.Join(dir, "writes")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(f.dir, "writes")); !os.IsNotExist(err) {
 				t.Fatal("eligibility check must never write to the registry")
 			}
 		})
@@ -139,12 +187,12 @@ func TestPublicationEligibility(t *testing.T) {
 }
 
 func TestInspectPublishedImage(t *testing.T) {
-	fixture(t)
+	f := fixture(t)
 	data, err := os.ReadFile("testdata/registry.json")
-	if err != nil || os.WriteFile(os.Getenv("FIXTURE_REGISTRY"), data, 0600) != nil {
+	if err != nil || os.WriteFile(f.getenv("FIXTURE_REGISTRY"), data, 0600) != nil {
 		t.Fatal("prepare registry fixture")
 	}
-	output, err := command("verify", revision, digest)
+	output, err := f.command("verify", revision, digest)
 	if err != nil || !strings.Contains(string(output), "verified linux/amd64 and linux/arm64") {
 		t.Fatalf("complete image must verify: %s", output)
 	}
@@ -171,12 +219,12 @@ func TestIncompleteRegistryArtifactsFail(t *testing.T) {
 		{"invalid JSON", "{", "!"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture(t)
+			f := fixture(t)
 			data := strings.Replace(string(original), test.from, test.to, 1)
-			if os.WriteFile(os.Getenv("FIXTURE_REGISTRY"), []byte(data), 0600) != nil {
+			if os.WriteFile(f.getenv("FIXTURE_REGISTRY"), []byte(data), 0600) != nil {
 				t.Fatal("write fixture")
 			}
-			if _, err := command("verify", revision, digest); err == nil {
+			if _, err := f.command("verify", revision, digest); err == nil {
 				t.Fatal("incomplete or inconsistent artifact must fail inspection")
 			}
 		})
@@ -189,14 +237,14 @@ func TestMainPromotion(t *testing.T) {
 		{"main advances during inspection", strings.Repeat("2", 40)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			dir := fixture(t)
+			f := fixture(t)
 			data, _ := os.ReadFile("testdata/registry.json")
-			if os.WriteFile(os.Getenv("FIXTURE_REGISTRY"), data, 0600) != nil {
+			if os.WriteFile(f.getenv("FIXTURE_REGISTRY"), data, 0600) != nil {
 				t.Fatal("write fixture")
 			}
-			t.Setenv("FIXTURE_AFTER_INSPECT_HEAD", test.changedHead)
-			output, err := command("promote", digest)
-			writes, readErr := os.ReadFile(filepath.Join(dir, "writes"))
+			f.setenv("FIXTURE_AFTER_INSPECT_HEAD", test.changedHead)
+			output, err := f.command("promote", digest)
+			writes, readErr := os.ReadFile(filepath.Join(f.dir, "writes"))
 			if test.changedHead != "" {
 				if err == nil || !os.IsNotExist(readErr) {
 					t.Fatal("stale promotion must fail without registry writes")
@@ -217,13 +265,13 @@ func TestPackageMustBePublicAndLinkedBeforePromotion(t *testing.T) {
 		`{"visibility":"public","repository":null}`,
 		`not json`,
 	} {
-		fixture(t)
+		f := fixture(t)
 		registry, _ := os.ReadFile("testdata/registry.json")
-		if os.WriteFile(os.Getenv("FIXTURE_REGISTRY"), registry, 0600) != nil || os.WriteFile(os.Getenv("FIXTURE_PACKAGE"), []byte(data), 0600) != nil {
+		if os.WriteFile(f.getenv("FIXTURE_REGISTRY"), registry, 0600) != nil || os.WriteFile(f.getenv("FIXTURE_PACKAGE"), []byte(data), 0600) != nil {
 			t.Fatal("write fixtures")
 		}
-		_, err := command("promote", digest)
-		_, writeErr := os.Stat(os.Getenv("FIXTURE_WRITES"))
+		_, err := f.command("promote", digest)
+		_, writeErr := os.Stat(f.getenv("FIXTURE_WRITES"))
 		if err == nil || !os.IsNotExist(writeErr) {
 			t.Fatal("unreadable, private or unlinked package must block main-tag promotion")
 		}
@@ -258,13 +306,13 @@ func TestReleaseSourceEligibility(t *testing.T) {
 		{"failed validation", "push", "refs/tags/v1.2.3", "VALIDATION_RESULTS", `{}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture(t)
-			t.Setenv("GITHUB_EVENT_NAME", test.event)
-			t.Setenv("GITHUB_REF", test.ref)
+			f := fixture(t)
+			f.setenv("GITHUB_EVENT_NAME", test.event)
+			f.setenv("GITHUB_REF", test.ref)
 			if test.setting != "" {
-				t.Setenv(test.setting, test.value)
+				f.setenv(test.setting, test.value)
 			}
-			out, err := command("gate")
+			out, err := f.command("gate")
 			if (err == nil) != test.allowed {
 				t.Fatalf("allowed=%v want %v: %s", err == nil, test.allowed, out)
 			}

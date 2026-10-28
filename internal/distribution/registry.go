@@ -6,30 +6,31 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"time"
 )
 
-var registryHTTP = &http.Client{
-	Transport: &http.Transport{Proxy: nil}, Timeout: 20 * time.Second,
-	CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("registry redirects forbidden") },
+func newRegistryClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{Proxy: nil}, Timeout: 20 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("registry redirects forbidden") },
+	}
 }
 
-func registryGet(ctx context.Context, path, token string) ([]byte, http.Header, int, error) {
+func (d *distribution) registryGet(ctx context.Context, path, token string) ([]byte, http.Header, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ghcr.io"+path, nil)
 	if err != nil {
 		return nil, nil, 0, errors.New("invalid registry request")
 	}
 	if token == "" {
-		if os.Getenv("GH_TOKEN") == "" || os.Getenv("GITHUB_ACTOR") == "" {
+		if d.getenv("GH_TOKEN") == "" || d.getenv("GITHUB_ACTOR") == "" {
 			return nil, nil, 0, errors.New("workflow registry credentials required")
 		}
-		req.SetBasicAuth(os.Getenv("GITHUB_ACTOR"), os.Getenv("GH_TOKEN"))
+		req.SetBasicAuth(d.getenv("GITHUB_ACTOR"), d.getenv("GH_TOKEN"))
 	} else {
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
 	}
-	resp, err := registryHTTP.Do(req)
+	resp, err := d.registry.Do(req)
 	if err != nil {
 		return nil, nil, 0, errors.New("registry lookup failed; state is uncertain")
 	}
@@ -43,8 +44,8 @@ func registryGet(ctx context.Context, path, token string) ([]byte, http.Header, 
 
 // A CLI inspection failure is not evidence of absence. Only an authenticated
 // manifest lookup with an explicit MANIFEST_UNKNOWN response permits creation.
-func lookup(ctx context.Context, tag string) (string, error) {
-	data, _, status, err := registryGet(ctx, "/token?service=ghcr.io&scope=repository:yaasha/near-e2ee-proxy:pull", "")
+func (d *distribution) lookup(ctx context.Context, tag string) (string, error) {
+	data, _, status, err := d.registryGet(ctx, "/token?service=ghcr.io&scope=repository:yaasha/near-e2ee-proxy:pull", "")
 	if err != nil {
 		return "", err
 	}
@@ -52,7 +53,7 @@ func lookup(ctx context.Context, tag string) (string, error) {
 	if status != 200 || json.Unmarshal(data, &auth) != nil || auth.Token == "" {
 		return "", errors.New("registry authentication failed; refusing publication")
 	}
-	data, headers, status, err := registryGet(ctx, "/v2/yaasha/near-e2ee-proxy/manifests/"+tag, auth.Token)
+	data, headers, status, err := d.registryGet(ctx, "/v2/yaasha/near-e2ee-proxy/manifests/"+tag, auth.Token)
 	if err != nil {
 		return "", err
 	}
