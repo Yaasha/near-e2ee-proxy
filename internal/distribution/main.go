@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -21,86 +23,107 @@ const source = "https://github.com/" + repository
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+// distribution runs the publication command with explicit process boundaries.
+// Production uses the real tools and fixed registry; tests supply synthetic
+// command/HTTP responses without starting child processes or changing globals.
+type distribution struct {
+	getenv         func(string) string
+	command        func(context.Context, string, ...string) ([]byte, error)
+	registry       *http.Client
+	stdout, stderr io.Writer
+}
+
+func newDistribution() *distribution {
+	return &distribution{getenv: os.Getenv, command: output, registry: newRegistryClient(), stdout: os.Stdout, stderr: os.Stderr}
+}
+
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if err := run(ctx, os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		if path := os.Getenv("GITHUB_STEP_SUMMARY"); path != "" {
+	if err := newDistribution().execute(ctx, os.Args[1:]); err != nil {
+		os.Exit(1)
+	}
+}
+
+func (d *distribution) execute(ctx context.Context, args []string) error {
+	err := d.run(ctx, args)
+	if err != nil {
+		fmt.Fprintln(d.stderr, err)
+		if path := d.getenv("GITHUB_STEP_SUMMARY"); path != "" {
 			if summary, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); openErr == nil {
 				fmt.Fprintf(summary, "Publication refused: %s\n", err)
 				summary.Close()
 			}
 		}
-		os.Exit(1)
 	}
+	return err
 }
 
-func run(ctx context.Context, args []string) error {
+func (d *distribution) run(ctx context.Context, args []string) error {
 	if len(args) == 1 && args[0] == "prepare" {
-		return prepare(ctx)
+		return d.prepare(ctx)
 	}
 	if len(args) == 2 && args[0] == "recover" {
-		if err := gate(ctx); err != nil {
+		if err := d.gate(ctx); err != nil {
 			return err
 		}
-		return promoteRelease(ctx, args[1], true)
+		return d.promoteRelease(ctx, args[1], true)
 	}
 	if len(args) == 1 && args[0] == "gate" {
-		if err := gate(ctx); err != nil {
+		if err := d.gate(ctx); err != nil {
 			return err
 		}
-		fmt.Println("eligible")
+		fmt.Fprintln(d.stdout, "eligible")
 		return nil
 	}
 	if len(args) == 3 && args[0] == "verify" {
-		if err := verify(ctx, args[1], args[2]); err != nil {
+		if err := d.verify(ctx, args[1], args[2]); err != nil {
 			return err
 		}
-		fmt.Println("verified linux/amd64 and linux/arm64 metadata, provenance and SBOM")
+		fmt.Fprintln(d.stdout, "verified linux/amd64 and linux/arm64 metadata, provenance and SBOM")
 		return nil
 	}
 	if len(args) == 2 && args[0] == "promote" {
-		return promote(ctx, args[1])
+		return d.promote(ctx, args[1])
 	}
 	return errors.New("usage: distribution gate | prepare | verify <revision> <digest> | promote <digest> | recover <digest>")
 }
 
-func promote(ctx context.Context, digest string) error {
-	if err := gate(ctx); err != nil {
+func (d *distribution) promote(ctx context.Context, digest string) error {
+	if err := d.gate(ctx); err != nil {
 		return err
 	}
-	if strings.HasPrefix(os.Getenv("GITHUB_REF"), "refs/tags/") {
-		return promoteRelease(ctx, digest, false)
+	if strings.HasPrefix(d.getenv("GITHUB_REF"), "refs/tags/") {
+		return d.promoteRelease(ctx, digest, false)
 	}
-	if err := verify(ctx, os.Getenv("GITHUB_SHA"), digest); err != nil {
+	if err := d.verify(ctx, d.getenv("GITHUB_SHA"), digest); err != nil {
 		return err
 	}
-	if err := publicPackage(ctx); err != nil {
+	if err := d.publicPackage(ctx); err != nil {
 		return err
 	}
 	// The workflow holds the shared publication concurrency lock. Check again
 	// immediately before the mutable write: inspection may have taken minutes.
 	// A later publisher cannot run concurrently and an older rerun fails here.
-	if err := gate(ctx); err != nil {
+	if err := d.gate(ctx); err != nil {
 		return err
 	}
-	if _, err := output(ctx, "docker", "buildx", "imagetools", "create", "--tag", image+":main", image+"@"+digest); err != nil {
+	if _, err := d.command(ctx, "docker", "buildx", "imagetools", "create", "--tag", image+":main", image+"@"+digest); err != nil {
 		return err
 	}
-	actual, err := output(ctx, "docker", "buildx", "imagetools", "inspect", image+":main", "--format", "{{.Manifest.Digest}}")
+	actual, err := d.command(ctx, "docker", "buildx", "imagetools", "inspect", image+":main", "--format", "{{.Manifest.Digest}}")
 	if err != nil || strings.TrimSpace(string(actual)) != digest {
 		return errors.New("main tag does not match the inspected digest")
 	}
-	fmt.Printf("Published %s:main and %s:sha-%s\nImage digest: %s\n", image, image, os.Getenv("GITHUB_SHA"), digest)
-	fmt.Println("Verified linux/amd64 and linux/arm64 metadata, SLSA v1 provenance and SPDX SBOM. GHCR package is public and linked to " + repository + ".")
+	fmt.Fprintf(d.stdout, "Published %s:main and %s:sha-%s\nImage digest: %s\n", image, image, d.getenv("GITHUB_SHA"), digest)
+	fmt.Fprintln(d.stdout, "Verified linux/amd64 and linux/arm64 metadata, SLSA v1 provenance and SPDX SBOM. GHCR package is public and linked to "+repository+".")
 	return nil
 }
 
-func publicPackage(ctx context.Context) error {
+func (d *distribution) publicPackage(ctx context.Context) error {
 	// Use only the workflow's package token, never a separate long-lived key.
 	// Public source alone is insufficient: confirm GHCR's actual package state.
-	data, err := output(ctx, "gh", "api", "users/Yaasha/packages/container/near-e2ee-proxy")
+	data, err := d.command(ctx, "gh", "api", "users/Yaasha/packages/container/near-e2ee-proxy")
 	if err != nil {
 		return err
 	}
@@ -116,22 +139,22 @@ func publicPackage(ctx context.Context) error {
 	return nil
 }
 
-func gate(ctx context.Context) error {
-	if os.Getenv("GITHUB_REPOSITORY") != repository || !commitPattern.MatchString(os.Getenv("GITHUB_SHA")) {
+func (d *distribution) gate(ctx context.Context) error {
+	if d.getenv("GITHUB_REPOSITORY") != repository || !commitPattern.MatchString(d.getenv("GITHUB_SHA")) {
 		return errors.New("publication requires trusted repository and source revision")
 	}
-	if event := os.Getenv("GITHUB_EVENT_NAME"); event != "push" && event != "workflow_dispatch" {
+	if event := d.getenv("GITHUB_EVENT_NAME"); event != "push" && event != "workflow_dispatch" {
 		return errors.New("event cannot publish images")
 	}
 	var checks map[string]struct{ Result string }
-	if json.Unmarshal([]byte(os.Getenv("VALIDATION_RESULTS")), &checks) != nil || checks["check"].Result != "success" || checks["containers"].Result != "success" {
+	if json.Unmarshal([]byte(d.getenv("VALIDATION_RESULTS")), &checks) != nil || checks["check"].Result != "success" || checks["containers"].Result != "success" {
 		return errors.New("all validation jobs must succeed before publication")
 	}
-	checkout, err := output(ctx, "git", "rev-parse", "HEAD")
-	if err != nil || strings.TrimSpace(string(checkout)) != os.Getenv("GITHUB_SHA") {
+	checkout, err := d.command(ctx, "git", "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(string(checkout)) != d.getenv("GITHUB_SHA") {
 		return errors.New("checkout does not match validated source")
 	}
-	ref := os.Getenv("GITHUB_REF")
+	ref := d.getenv("GITHUB_REF")
 	if ref != "refs/heads/main" {
 		if !strings.HasPrefix(ref, "refs/tags/") {
 			return errors.New("publication requires main or a version tag")
@@ -141,29 +164,29 @@ func gate(ctx context.Context) error {
 		}
 		// Fetch the current remote ref and peel annotated tags. Never label an
 		// artifact with an event revision when its tag now resolves elsewhere.
-		if _, err := output(ctx, "git", "fetch", "--no-tags", "origin", ref); err != nil {
+		if _, err := d.command(ctx, "git", "fetch", "--no-tags", "origin", ref); err != nil {
 			return err
 		}
-		tagged, err := output(ctx, "git", "rev-parse", "FETCH_HEAD^{commit}")
-		if err != nil || strings.TrimSpace(string(tagged)) != os.Getenv("GITHUB_SHA") {
+		tagged, err := d.command(ctx, "git", "rev-parse", "FETCH_HEAD^{commit}")
+		if err != nil || strings.TrimSpace(string(tagged)) != d.getenv("GITHUB_SHA") {
 			return errors.New("release tag no longer matches validated source")
 		}
 	}
-	head, err := output(ctx, "gh", "api", "repos/"+repository+"/git/ref/heads/main", "--jq", ".object.sha")
+	head, err := d.command(ctx, "gh", "api", "repos/"+repository+"/git/ref/heads/main", "--jq", ".object.sha")
 	if err != nil || !commitPattern.MatchString(strings.TrimSpace(string(head))) {
 		return errors.New("main cannot be checked")
 	}
 	if ref != "refs/heads/main" {
 		main := strings.TrimSpace(string(head))
-		if _, err := output(ctx, "git", "fetch", "--no-tags", "origin", main); err != nil {
+		if _, err := d.command(ctx, "git", "fetch", "--no-tags", "origin", main); err != nil {
 			return err
 		}
-		if _, err := output(ctx, "git", "merge-base", "--is-ancestor", os.Getenv("GITHUB_SHA"), main); err != nil {
+		if _, err := d.command(ctx, "git", "merge-base", "--is-ancestor", d.getenv("GITHUB_SHA"), main); err != nil {
 			return errors.New("release commit must be reachable from main")
 		}
 		return nil
 	}
-	if strings.TrimSpace(string(head)) != os.Getenv("GITHUB_SHA") {
+	if strings.TrimSpace(string(head)) != d.getenv("GITHUB_SHA") {
 		return errors.New("main has advanced or cannot be checked; refusing stale publication")
 	}
 	return nil
@@ -205,16 +228,16 @@ type registryImage struct {
 	}
 }
 
-func verify(ctx context.Context, revision, digest string) error {
-	return verifyVersion(ctx, revision, digest, "sha-"+revision)
+func (d *distribution) verify(ctx context.Context, revision, digest string) error {
+	return d.verifyVersion(ctx, revision, digest, "sha-"+revision)
 }
 
-func inspect(ctx context.Context, digest string) (registryImage, error) {
+func (d *distribution) inspect(ctx context.Context, digest string) (registryImage, error) {
 	var result registryImage
 	if !digestPattern.MatchString(digest) {
 		return result, errors.New("invalid image digest")
 	}
-	data, err := output(ctx, "docker", "buildx", "imagetools", "inspect", image+"@"+digest, "--format", inspection)
+	data, err := d.command(ctx, "docker", "buildx", "imagetools", "inspect", image+"@"+digest, "--format", inspection)
 	if err != nil {
 		return result, err
 	}
@@ -224,8 +247,8 @@ func inspect(ctx context.Context, digest string) (registryImage, error) {
 	return result, nil
 }
 
-func verifyVersion(ctx context.Context, revision, digest, version string) error {
-	result, err := inspect(ctx, digest)
+func (d *distribution) verifyVersion(ctx context.Context, revision, digest, version string) error {
+	result, err := d.inspect(ctx, digest)
 	if err != nil {
 		return err
 	}

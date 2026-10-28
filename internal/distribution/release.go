@@ -4,34 +4,33 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 )
 
-func promoteRelease(ctx context.Context, digest string, recovery bool) error {
-	v, err := releaseVersion(strings.TrimPrefix(os.Getenv("GITHUB_REF"), "refs/tags/"))
+func (d *distribution) promoteRelease(ctx context.Context, digest string, recovery bool) error {
+	v, err := releaseVersion(strings.TrimPrefix(d.getenv("GITHUB_REF"), "refs/tags/"))
 	if err != nil {
 		return err
 	}
 	if !digestPattern.MatchString(digest) {
 		return errors.New("invalid release digest")
 	}
-	if recovery && os.Getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" {
+	if recovery && d.getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" {
 		return errors.New("recovery requires manual dispatch")
 	}
-	if err := verifyVersion(ctx, os.Getenv("GITHUB_SHA"), digest, v.full); err != nil {
+	if err := d.verifyVersion(ctx, d.getenv("GITHUB_SHA"), digest, v.full); err != nil {
 		return err
 	}
-	if err := publicPackage(ctx); err != nil {
+	if err := d.publicPackage(ctx); err != nil {
 		return err
 	}
 	// The workflow holds ghcr-publication across these reads, the candidate build,
 	// full-version creation and all alias writes. No other publisher may bypass it.
-	if err := gate(ctx); err != nil {
+	if err := d.gate(ctx); err != nil {
 		return err
 	}
-	existing, err := lookup(ctx, v.full)
+	existing, err := d.lookup(ctx, v.full)
 	if err != nil {
 		return err
 	}
@@ -48,37 +47,37 @@ func promoteRelease(ctx context.Context, digest string, recovery bool) error {
 	}
 	if !v.prerelease {
 		for _, alias := range []string{v.minor, "latest"} {
-			advance, err := aliasCanAdvance(ctx, alias, v, digest)
+			advance, err := d.aliasCanAdvance(ctx, alias, v, digest)
 			if err != nil {
 				return err
 			}
 			if advance {
 				tags = append(tags, alias)
 			} else {
-				fmt.Printf("Preserved newer or equal stable alias %s\n", alias)
+				fmt.Fprintf(d.stdout, "Preserved newer or equal stable alias %s\n", alias)
 			}
 		}
 	}
 	for _, tag := range tags {
-		if err := writeTag(ctx, tag, digest); err != nil {
+		if err := d.writeTag(ctx, tag, digest); err != nil {
 			return err
 		}
-		fmt.Printf("Published %s:%s @ %s\n", image, tag, digest)
+		fmt.Fprintf(d.stdout, "Published %s:%s @ %s\n", image, tag, digest)
 	}
-	fmt.Printf("Release %s; source %s; image digest: %s\n", v.full, os.Getenv("GITHUB_SHA"), digest)
-	fmt.Println("Verified linux/amd64 and linux/arm64 OCI metadata, SLSA v1 provenance and SPDX SBOM. Publication does not deploy the service.")
+	fmt.Fprintf(d.stdout, "Release %s; source %s; image digest: %s\n", v.full, d.getenv("GITHUB_SHA"), digest)
+	fmt.Fprintln(d.stdout, "Verified linux/amd64 and linux/arm64 OCI metadata, SLSA v1 provenance and SPDX SBOM. Publication does not deploy the service.")
 	return nil
 }
 
-func aliasCanAdvance(ctx context.Context, alias string, next version, nextDigest string) (bool, error) {
-	d, err := lookup(ctx, alias)
+func (d *distribution) aliasCanAdvance(ctx context.Context, alias string, next version, nextDigest string) (bool, error) {
+	currentDigest, err := d.lookup(ctx, alias)
 	if err != nil {
 		return false, err
 	}
-	if d == "" {
+	if currentDigest == "" {
 		return true, nil
 	}
-	result, err := inspect(ctx, d)
+	result, err := d.inspect(ctx, currentDigest)
 	if err != nil {
 		return false, err
 	}
@@ -92,24 +91,24 @@ func aliasCanAdvance(ctx context.Context, alias string, next version, nextDigest
 	if err := verifyArtifact(result, labels["org.opencontainers.image.revision"], current.full); err != nil {
 		return false, err
 	}
-	full, err := lookup(ctx, current.full)
+	full, err := d.lookup(ctx, current.full)
 	if err != nil {
 		return false, err
 	}
-	if full != d {
+	if full != currentDigest {
 		return false, errors.New("stable alias does not match its preserved full-version image")
 	}
-	if current.full == next.full && d != nextDigest {
+	if current.full == next.full && currentDigest != nextDigest {
 		return false, errors.New("equal version has a different digest")
 	}
 	return next.newerThan(current), nil
 }
 
-func writeTag(ctx context.Context, tag, digest string) error {
-	if _, err := output(ctx, "docker", "buildx", "imagetools", "create", "--tag", image+":"+tag, image+"@"+digest); err != nil {
+func (d *distribution) writeTag(ctx context.Context, tag, digest string) error {
+	if _, err := d.command(ctx, "docker", "buildx", "imagetools", "create", "--tag", image+":"+tag, image+"@"+digest); err != nil {
 		return err
 	}
-	actual, err := lookup(ctx, tag)
+	actual, err := d.lookup(ctx, tag)
 	if err != nil {
 		return err
 	}
@@ -121,30 +120,30 @@ func writeTag(ctx context.Context, tag, digest string) error {
 
 var runNumberPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 
-func prepare(ctx context.Context) error {
-	if err := gate(ctx); err != nil {
+func (d *distribution) prepare(ctx context.Context) error {
+	if err := d.gate(ctx); err != nil {
 		return err
 	}
-	version, buildTag := "sha-"+os.Getenv("GITHUB_SHA"), "sha-"+os.Getenv("GITHUB_SHA")
+	version, buildTag := "sha-"+d.getenv("GITHUB_SHA"), "sha-"+d.getenv("GITHUB_SHA")
 	build := true
-	recovery := os.Getenv("RECOVER_DIGEST")
-	if strings.HasPrefix(os.Getenv("GITHUB_REF"), "refs/tags/") {
-		v, err := releaseVersion(strings.TrimPrefix(os.Getenv("GITHUB_REF"), "refs/tags/"))
+	recovery := d.getenv("RECOVER_DIGEST")
+	if strings.HasPrefix(d.getenv("GITHUB_REF"), "refs/tags/") {
+		v, err := releaseVersion(strings.TrimPrefix(d.getenv("GITHUB_REF"), "refs/tags/"))
 		if err != nil {
 			return err
 		}
 		version = v.full
-		id, attempt := os.Getenv("GITHUB_RUN_ID"), os.Getenv("GITHUB_RUN_ATTEMPT")
+		id, attempt := d.getenv("GITHUB_RUN_ID"), d.getenv("GITHUB_RUN_ATTEMPT")
 		if !runNumberPattern.MatchString(id) || !runNumberPattern.MatchString(attempt) {
 			return errors.New("candidate requires workflow run ID and attempt")
 		}
 		buildTag = "candidate-" + id + "-" + attempt
-		existing, err := lookup(ctx, v.full)
+		existing, err := d.lookup(ctx, v.full)
 		if err != nil {
 			return err
 		}
 		if recovery != "" {
-			if os.Getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" || !digestPattern.MatchString(recovery) || existing != recovery {
+			if d.getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" || !digestPattern.MatchString(recovery) || existing != recovery {
 				return errors.New("manual recovery requires the preserved full version's exact digest")
 			}
 			build = false
@@ -154,6 +153,6 @@ func prepare(ctx context.Context) error {
 	} else if recovery != "" {
 		return errors.New("recovery requires a version tag")
 	}
-	fmt.Printf("version=%s\nbuild_tag=%s\nbuild=%t\n", version, buildTag, build)
+	fmt.Fprintf(d.stdout, "version=%s\nbuild_tag=%s\nbuild=%t\n", version, buildTag, build)
 	return nil
 }

@@ -348,13 +348,18 @@ visibility and repository association remain administrative prerequisites.
 
 ### Release validation evidence
 
-Maintained CLI regressions use synthetic events, Git/source state, authenticated
-HTTP registry responses and artifact fixtures. They cover preservation, retries,
-recovery, numeric ordering, older minor/patch releases, prerelease-to-stable
+Maintained in-process command regressions use synthetic events, Git/source state,
+authenticated HTTP registry responses and artifact fixtures. Environment, external
+command execution and output belong to each command instance; ordinary policy
+tests start no child processes or real Git repositories. This avoids repeated
+race-detector process-exit delays while retaining the publication-policy cases.
+The policy cases cover preservation, retries, recovery, numeric ordering, older
+minor/patch releases, prerelease-to-stable
 transitions and either serialized arrival order of competing publishers. Workflow
 configuration regressions check the common publication lock, validation gates,
 least-privilege token and immutable-source build. These tests do not execute
-GitHub's scheduler or establish hosted registry permissions. Run them through
+GitHub's scheduler or establish hosted registry permissions. Real Git/GitHub/Docker
+integration is exercised by hosted publication. Run them through
 `mise run distribution-test` or `mise run check`.
 
 The release path has local synthetic policy/artifact coverage and retains the
@@ -363,11 +368,12 @@ on Docker Desktop for native ARM64 and emulated AMD64. The prior development
 publication at `c21bba2` passed both native hosted container jobs, publication and
 both anonymous pulls in
 [run 40600221862](https://github.com/Yaasha/near-e2ee-proxy/actions/runs/40600221862).
-A hosted versioned publication and its resulting GHCR attachments/anonymous pulls
-have not yet been exercised for
-this change. That evidence requires pushing a fresh release tag containing this
-workflow after review; do not treat local fixtures or prior development runs as
-hosted release evidence. No application keys or paid inference are needed.
+The initial [v0.1.0 release](https://github.com/Yaasha/near-e2ee-proxy/releases/tag/v0.1.0)
+passed hosted checks, both native container jobs, actual registry metadata and
+attachment inspection, and both anonymous pulls in
+[run 40607890984](https://github.com/Yaasha/near-e2ee-proxy/actions/runs/40607890984).
+That run validates the released implementation; future command changes still
+require their own validation. No application keys or paid inference are needed.
 
 ## First-publication visibility
 
