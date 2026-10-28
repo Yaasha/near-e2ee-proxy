@@ -3,9 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      recover_digest:
+        description: 'Optional: repair aliases of an existing version using its exact preserved digest; select its v tag'
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -65,7 +71,7 @@ jobs:
     needs: [check, containers]
     if: >-
       github.repository == 'Yaasha/near-e2ee-proxy' &&
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.check.result == 'success' && needs.containers.result == 'success'
     runs-on: ubuntu-24.04
@@ -73,19 +79,21 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # All future stable-release writers must use this same lock. Do not cancel
-    # registry writes or use separate per-event/per-tag publication locks.
+    # Every development/release check and write is inside this same lock.
+    # Never use separate per-event/per-tag locks or cancel an active writer.
     concurrency:
       group: ghcr-publication
       cancel-in-progress: false
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.result.outputs.digest }}
     env:
       VALIDATION_RESULTS: ${{ toJSON(needs) }}
+      RECOVER_DIGEST: ${{ inputs.recover_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
@@ -93,8 +101,9 @@ jobs:
           install: false
           cache: false
       - run: mise --locked install
-      - name: Check trusted source, validation results and current main
-        run: mise exec -- go run ./internal/distribution gate
+      - name: Check trusted source, validation and version preservation
+        id: plan
+        run: mise exec -- go run ./internal/distribution prepare >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -109,14 +118,15 @@ jobs:
       - name: Creation timestamp
         id: metadata
         run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-      - name: Build the validated immutable source and publish its source tag
+      - name: Build the validated immutable source and publish its candidate or source tag
         id: build
+        if: steps.plan.outputs.build == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: https://github.com/Yaasha/near-e2ee-proxy.git#${{ github.sha }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/yaasha/near-e2ee-proxy:sha-${{ github.sha }}
+          tags: ghcr.io/yaasha/near-e2ee-proxy:${{ steps.plan.outputs.build_tag }}
           provenance: mode=max,version=v1
           sbom: true
           labels: |
@@ -124,13 +134,21 @@ jobs:
             org.opencontainers.image.description=Verified model-key E2EE Chat Completions proxy
             org.opencontainers.image.source=https://github.com/Yaasha/near-e2ee-proxy
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=sha-${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.plan.outputs.version }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
-      - name: Inspect registry attachments and promote current main
+      - name: Inspect registry attachments and publish guarded tags or recover aliases
+        id: result
         run: |
-          mise exec -- go run ./internal/distribution promote "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-          echo 'The sha tag identifies source; the digest identifies this exact image index, including attachments. Publication does not deploy the service.' >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$RECOVER_DIGEST" ]; then
+            digest="$RECOVER_DIGEST"
+            mise exec -- go run ./internal/distribution recover "$digest" >> "$GITHUB_STEP_SUMMARY"
+          else
+            digest="$IMAGE_DIGEST"
+            mise exec -- go run ./internal/distribution promote "$digest" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo 'Pin the exact digest for deployment. Publication does not deploy the service.' >> "$GITHUB_STEP_SUMMARY"
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}

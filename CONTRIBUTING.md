@@ -19,15 +19,17 @@ a build and an HTTP smoke test. It needs no API keys and makes no paid requests.
 Use the pinned compiler and dependency versions. Keep source comments helpful to
 someone learning Go, especially around validation and verification boundaries.
 
-GitHub Actions runs these validation gates on main pushes and opened, updated or
-reopened PRs. CI checks formatting without changing submitted files. Separate
+GitHub Actions runs these validation gates on main and version-tag pushes, manual
+dispatch and opened, updated or reopened PRs. CI checks formatting without changing submitted files. Separate
 native AMD64/ARM64 jobs build and run the container regressions. Validation jobs
 have read-only repository permissions and receive no application credentials.
-PRs never log into GHCR or publish images. Trusted current-main push and manual
-runs publish development images only after all validation succeeds; only the
+PRs never log into GHCR or publish images. Trusted current-main runs publish
+development images; `v` tag pushes and manual tag dispatches publish guarded
+releases only after all validation succeeds. Only the
 serialized publication job has package-write permission. Anonymous pull checks
 then run separately for both architectures. See
-[distribution](docs/CONTAINERS.md#development-images-on-ghcr).
+[distribution](docs/CONTAINERS.md#development-images-on-ghcr) and the
+[release procedure](docs/CONTAINERS.md#versioned-releases).
 
 For container changes, run `CONTAINER_ARCH=amd64 mise run container-test` and
 `CONTAINER_ARCH=arm64 mise run container-test`. Docker must support running the

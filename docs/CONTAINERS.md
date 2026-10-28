@@ -126,7 +126,8 @@ with the pinned SDK and runtime, not live inference in the container. Existing
 live-model results in the compatibility document are separate. No live inference
 or paid request is part of these checks.
 
-CI runs on main pushes, manual dispatch and opened, synchronized, reopened or ready-for-review PRs.
+CI runs on main and `v*` tag pushes, manual dispatch and opened, synchronized,
+reopened or ready-for-review PRs.
 The validation job runs `mise run lint` and the existing `mise run check`; it
 reports formatting errors without rewriting source. Separate `ubuntu-24.04` and
 `ubuntu-24.04-arm` jobs build and execute AMD64/ARM64 images on native runners,
@@ -177,20 +178,23 @@ ARM64. `:main` follows successfully validated current main; `:sha-<full-commit>`
 identifies the source commit. A rerun can produce a different artifact for the
 same source (for example, creation timestamps or scanner output can change).
 Use `@sha256:<index-digest>` to identify an exact image index and its attachments.
-There is no `latest` tag or stable semantic-version release automation yet.
+Stable and prerelease images follow the [versioned release procedure](#versioned-releases);
+main builds never update `latest` or a stable minor alias.
 
 The Go checks, pinned workflow/Dockerfile linters, and both native architecture
 container jobs must all succeed before publication. The publication job checks
 the repository, event, ref, checkout and current main revision before registry
-login. PRs, forks, tags and manual dispatches on other branches cannot publish.
+login. PRs, forks and manual dispatches on other branches cannot publish. Version
+tags use the additional source and preservation gates described below.
 Only that job receives `packages: write`; login uses the automatically supplied
 short-lived `GITHUB_TOKEN`, with no separate registry secret. No application key
 or inference is involved. The build uses an immutable Git context at the validated
 commit, with the same pinned Dockerfile/compiler/dependencies as the runtime tests.
 
 Publication jobs share the `ghcr-publication` concurrency group and are never
-cancelled by a newer run. A future stable-release publisher must share this same
-lock. GitHub does not guarantee queued run order, so the command rechecks main
+cancelled by a newer run. Development builds, releases and manual recovery all
+use this same lock across source checks, registry reads, builds and tag writes.
+GitHub does not guarantee queued run order, so the command rechecks main
 immediately before promoting the inspected digest to `:main`. A stale run fails
 without moving that tag; if main advances during the build, a source tag may have
 been published, but promotion is refused. A new commit arriving just after the
@@ -198,7 +202,8 @@ last check can temporarily leave main pointing to the prior validated revision;
 the shared lock prevents an older writer from overwriting a newer publication.
 
 Each platform has OCI title, description, source repository, full revision,
-`sha-<commit>` version, MIT license and UTC creation-time labels. The source label
+`sha-<commit>` development version (or complete release version), MIT license and
+UTC creation-time labels. The source label
 and workflow token associate the GHCR package with this repository. BuildKit
 attaches maximum-detail SLSA v1 provenance and an SPDX SBOM per platform. Before
 promotion, `internal/distribution` reads the actual registry configs and attachment
@@ -221,10 +226,150 @@ For a CLI equivalent, use:
 gh workflow run ci.yaml --repo Yaasha/near-e2ee-proxy --ref main
 ```
 
-Branch dispatches run validation but cannot publish. Review the
+Branch dispatches outside main run validation but cannot publish. Tag dispatches
+follow the release rules below. Review the
 publication and both `public-pull` job summaries before treating a run as evidence.
 
-### First-publication visibility
+## Versioned releases
+
+Merge the intended source and release workflow into main first. Choose a fresh
+`vMAJOR.MINOR.PATCH` tag, such as `v1.2.3`, or a prerelease such as
+`v1.3.0-rc.1`. Tags use strict SemVer decimal components (no leading zeros);
+prerelease identifiers contain ASCII letters, digits or hyphens, separated by
+dots, and numeric identifiers have no leading zeros. The resulting image tag is
+at most 128 characters. Build metadata (`+build`) is rejected because OCI tags
+cannot represent it unchanged; it is never silently removed or rewritten.
+
+Create and push the tag deliberately, substituting the reviewed commit:
+
+```sh
+git tag -a v1.2.3 <reviewed-main-commit> -m 'Release v1.2.3'
+git push origin refs/tags/v1.2.3
+# Prerelease example, as a separate release:
+# git tag -a v1.3.0-rc.1 <reviewed-main-commit> -m 'Prerelease v1.3.0-rc.1'
+# git push origin refs/tags/v1.3.0-rc.1
+```
+
+A tag push runs all ordinary checks and both native architecture container jobs.
+The publisher checks the event repository, checkout revision, current remote tag
+(peeled for annotated tags) and reachability of that exact commit from current
+main. Malformed versions, moved tags, off-main commits, PR events and failed or
+incomplete checks cannot publish. A GitHub Release page is optional: its creation
+is not a second publication trigger. The workflow at the tagged commit must
+include this release implementation.
+
+| Source | Full image tag | Mutable aliases |
+| --- | --- | --- |
+| Main | `sha-<full-commit>` | `main`, only for validated current main |
+| `v1.2.3` | `1.2.3`, preserved | `1.2` and `latest` when semantically newer |
+| `v1.3.0-rc.1` | `1.3.0-rc.1`, preserved | None |
+
+There are no major-only aliases. Numeric version order decides alias advancement,
+not publication time or string order: `1.2.10` is newer than `1.2.9`. A late
+`1.2.8` can publish its absent full version without replacing `1.2.10` at `1.2`;
+a release from an older minor can advance its own minor without downgrading
+`latest`. Prereleases never compete for stable aliases. Existing stable aliases
+must reference a preserved stable full version, with matching platform metadata,
+revision, provenance and SBOM; unknown or inconsistent targets block publication.
+
+The entire publication job holds the same non-cancellable `ghcr-publication`
+concurrency lock for development, release and recovery. It reads registry state
+after acquiring the lock and rechecks the source and full version after the
+candidate build. GitHub does not guarantee ordering across runs; the default
+concurrency queue can replace a pending job with a newer pending job. A cancelled
+pending run has made no registry write and can be rerun. Do not bypass the lock
+with another workflow, a local push, tag deletion, or package-admin rewrites.
+GHCR does not provide a transactional compare-and-swap for these tag writes;
+preservation relies on trusted repository/package administrators and all writers
+following this workflow. Protect release Git tags against movement/deletion with
+repository rules as part of administration.
+
+Before building a release, an authenticated GHCR lookup must positively establish
+that its complete version is absent. Only HTTP 404 with `MANIFEST_UNKNOWN` counts.
+Authentication errors, network errors, rate limits, redirects, malformed replies
+and ambiguous not-found responses fail closed. An existing full version refuses
+replacement, including a repeated trigger or ordinary manual retry; the job log
+and summary explain the refusal.
+
+New release builds first push `candidate-<run-id>-<attempt>`, with the release
+version in OCI labels. Actual registry inspection must validate Linux AMD64/ARM64,
+source revision, complete version, licenses, timestamps, SLSA v1 provenance and
+SPDX SBOM attachments before assigning the full-version tag. Alias decisions are
+computed before any release-tag write. Tags are then written full version first,
+minor alias next and `latest` last, each checked against the inspected digest.
+The candidate may remain after failure; it is not an operator release alias.
+Retain published release digests and their attachments; do not clean up candidate
+manifests by deleting a digest shared with a preserved version.
+
+### Manual release operation and recovery
+
+To validate and publish an absent version manually, dispatch **Actions → CI →
+Run workflow** on its existing `v` tag with `recover_digest` empty. Equivalently:
+
+```sh
+gh workflow run ci.yaml --repo Yaasha/near-e2ee-proxy --ref v1.2.3
+```
+
+Manual operation runs the same source, validation, registry and alias gates. It
+cannot publish a feature branch, rebuild an existing full version or substitute
+another revision in its labels. Keep main dispatches unchanged, without inputs.
+
+If a run fails before the full version is written, fix the cause and rerun all
+jobs or the failed publication job. It rechecks state under the lock and can
+build a new candidate only while the version is positively absent. If a write
+succeeded but its acknowledgement/inspection failed, do not assume it is absent.
+Inspect the full-version tag and the recorded candidate digest first.
+
+If the full-version tag exists but alias updates or post-write checks failed,
+ordinary reruns intentionally refuse replacement. Obtain the exact preserved
+index digest, review its source and attachments, then explicitly recover:
+
+```sh
+gh workflow run ci.yaml --repo Yaasha/near-e2ee-proxy --ref v1.2.3 \
+  -f recover_digest=sha256:<preserved-index-digest>
+```
+
+Recovery reruns validation, checks the tag and main ancestry, verifies that the
+full version still matches the supplied digest, and inspects all artifact
+metadata and attachments. It skips rebuilding and never writes the full-version
+tag. It can only advance eligible aliases; an intervening newer release remains
+newer. Repeating recovery is safe. Prerelease recovery only verifies the preserved
+artifact. A missing version or different digest is refused. If existing alias
+metadata is inconsistent, investigate it rather than deleting preserved versions
+or forcing an overwrite. Release preservation is deliberate: timestamps,
+provenance and SBOMs can change on routine rebuilds, so rebuilding the same source
+must not change the meaning of a previously published release. Publish a new patch
+version for an intended rebuilt release.
+
+Review the publication digest summary and both anonymous `public-pull` jobs for
+every release or recovery. Pin the reviewed `@sha256:` digest for deployment using
+the Compose procedure below; publication never restarts a running service. Registry
+visibility and repository association remain administrative prerequisites.
+
+### Release validation evidence
+
+Maintained CLI regressions use synthetic events, Git/source state, authenticated
+HTTP registry responses and artifact fixtures. They cover preservation, retries,
+recovery, numeric ordering, older minor/patch releases, prerelease-to-stable
+transitions and either serialized arrival order of competing publishers. Workflow
+configuration regressions check the common publication lock, validation gates,
+least-privilege token and immutable-source build. These tests do not execute
+GitHub's scheduler or establish hosted registry permissions. Run them through
+`mise run distribution-test` or `mise run check`.
+
+The release path has local synthetic policy/artifact coverage and retains the
+existing two-architecture runtime validation. Local container regressions passed
+on Docker Desktop for native ARM64 and emulated AMD64. The prior development
+publication at `c21bba2` passed both native hosted container jobs, publication and
+both anonymous pulls in
+[run 40600221862](https://github.com/Yaasha/near-e2ee-proxy/actions/runs/40600221862).
+A hosted versioned publication and its resulting GHCR attachments/anonymous pulls
+have not yet been exercised for
+this change. That evidence requires pushing a fresh release tag containing this
+workflow after review; do not treat local fixtures or prior development runs as
+hosted release evidence. No application keys or paid inference are needed.
+
+## First-publication visibility
 
 A public source repository is insufficient evidence of an anonymously readable
 package. Workflow-created packages can inherit repository access; test anonymous
@@ -262,7 +407,7 @@ docker buildx imagetools inspect "$image" --format '{{json .SBOM}}'
 These inspection commands follow [Docker's attestation format and inspection
 documentation](https://docs.docker.com/build/metadata/attestations/).
 
-### Deliberate Compose updates
+## Deliberate Compose updates
 
 Publication never deploys or restarts a service. Review the source change,
 validation summaries, labels and attachments; record the chosen digest and retain
@@ -283,7 +428,7 @@ supports local builds. To roll back, select the prior digest and repeat these
 commands. The health probe checks local liveness only; perform authenticated
 readiness deliberately when needed. Omit `PROXY_IMAGE` for the local build flow.
 
-### Weekly infrastructure updates
+## Weekly infrastructure updates
 
 Dependabot proposes GitHub Actions and Docker base updates every Monday at 09:00
 Europe/London. It updates action commit pins, including the publication actions,
