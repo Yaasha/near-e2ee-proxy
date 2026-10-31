@@ -66,6 +66,10 @@ fallback providers configured deliberately. Actual LiteLLM/Hermes/OpenCode/Orion
 versions have not been tested; see [the supported contract](docs/COMPATIBILITY.md).
 Codex needs Responses support or an existing external adapter.
 
+The proxy also accepts top-level boolean `enable_thinking` and translates it to
+the nested form shown above. Numeric `thinking_budget` presets are unsupported
+and produce a specific error; see [router thinking controls](docs/COMPATIBILITY.md#thinking-controls-through-routers).
+
 Choose a model in each request's `model` field using its canonical NEAR ID. It
 does not need to appear in the proxy's configured discovery list. The selected
 model must pass CPU/GPU verification and support the encrypted inference path;

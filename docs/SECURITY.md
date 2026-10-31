@@ -84,6 +84,14 @@ metadata remain observable. Do not encode private content into protocol IDs.
 Field encryption does not provide full forward secrecy against later compromise
 of a long-lived recipient model key.
 
+The top-level `enable_thinking` alias accepts only a boolean and normalizes to
+`chat_template_kwargs.enable_thinking` before the request reaches the SDK. This
+control remains observable protocol metadata; prompts and tool data retain the
+existing encryption requirements. Conflicting controls fail locally. Numeric
+`thinking_budget` is rejected with a fixed public field name and explanation,
+because silently approximating or dropping a requested cap would change its
+meaning. Validation errors never include values or arbitrary field names.
+
 Local HTTP is appropriate for loopback. Use HTTPS or an encrypted tunnel when
 traffic crosses other machines. Avoid HTTP debug dumps, request-body capture and
 client/provider fallbacks outside the intended trust boundary.

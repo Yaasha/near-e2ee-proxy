@@ -88,7 +88,11 @@ type namedChoice struct {
 // not recursively call the same UnmarshalJSON method forever.
 func (r *Request) UnmarshalJSON(b []byte) error {
 	type plain Request
-	return fields(b, (*plain)(r), "model messages tools tool_choice parallel_tool_calls temperature top_p frequency_penalty presence_penalty max_tokens max_completion_tokens seed n reasoning_effort chat_template_kwargs response_format stream stream_options")
+	normalized, err := normalizeThinking(b)
+	if err != nil {
+		return err
+	}
+	return fields(normalized, (*plain)(r), "model messages tools tool_choice parallel_tool_calls temperature top_p frequency_penalty presence_penalty max_tokens max_completion_tokens seed n reasoning_effort chat_template_kwargs response_format stream stream_options")
 }
 func (m *Message) UnmarshalJSON(b []byte) error {
 	type plain Message
@@ -139,7 +143,13 @@ func validModelID(model string) bool {
 
 func parseRequest(raw []byte) (Request, error) {
 	var r Request
-	if !validJSON(raw) || json.Unmarshal(raw, &r) != nil || !validModelID(r.Model) || len(r.Messages) == 0 || len(r.Messages) > 1024 {
+	if !validJSON(raw) {
+		return r, errInvalid
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return r, err
+	}
+	if !validModelID(r.Model) || len(r.Messages) == 0 || len(r.Messages) > 1024 {
 		return r, errInvalid
 	}
 	if !within(r.Temperature, 0, 2) || !within(r.TopP, 0, 1) || !within(r.FrequencyPenalty, -2, 2) || !within(r.PresencePenalty, -2, 2) || (r.N != nil && *r.N != 1) {

@@ -133,7 +133,12 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	}
 	request, err := parseRequest(raw)
 	if err != nil {
-		writeError(w, 400, "invalid_request_error", "unsupported_request", "Invalid request, unsupported field, or invalid model ID; see the compatibility documentation.")
+		message, param := "Invalid request, unsupported field, or invalid model ID; see the compatibility documentation.", ""
+		var field *requestFieldError
+		if errors.As(err, &field) {
+			message, param = field.message, field.param
+		}
+		writeErrorParam(w, 400, "invalid_request_error", "unsupported_request", message, param)
 		return
 	}
 	stream, includeUsage := request.Stream, request.StreamOptions != nil && request.StreamOptions.IncludeUsage
@@ -173,5 +178,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, kind, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": code}})
+	writeErrorParam(w, status, kind, code, message, "")
+}
+
+func writeErrorParam(w http.ResponseWriter, status int, kind, code, message, param string) {
+	var parameter any
+	if param != "" {
+		parameter = param
+	}
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": kind, "param": parameter, "code": code}})
 }

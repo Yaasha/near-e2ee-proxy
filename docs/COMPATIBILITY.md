@@ -36,6 +36,9 @@ request.
   1,024 completion tokens. Only one choice (`n: 1`) is supported.
 - `reasoning_effort`: `none`, `minimal`, `low`, `medium`, `high`.
 - `chat_template_kwargs`: only boolean `enable_thinking`.
+- Top-level boolean `enable_thinking`: normalized to
+  `chat_template_kwargs.enable_thinking` before SDK encryption. If both are
+  supplied they must agree; null, other types and conflicting values fail locally.
 - `response_format`: only `text` or `json_object`.
 - `stream` and `stream_options.include_usage`.
 
@@ -49,6 +52,18 @@ hyphens, dots or slashes, starting with a letter/digit/underscore/hyphen; `..` i
 rejected. The SDK disables aliasing and verifies the requested model before
 inference. Missing/invalid confidential evidence fails with a safe 502 error;
 catalog availability alone never authorizes inference.
+
+The thinking toggle follows [NEAR's documented request
+format](https://docs.near.ai/cloud/reasoning-models). It controls on/off where the
+selected model supports it; the proxy does not promise that every model can
+disable thinking. The toggle remains observable boolean protocol metadata, like
+sampling settings. It never accepts arbitrary text.
+
+Numeric `thinking_budget` is unsupported, including null. It returns HTTP 400
+with `error.param: "thinking_budget"` and a fixed explanation that an exact
+reasoning-token cap cannot be guaranteed. The proxy does not silently discard it,
+convert it into an output-token limit or approximate it with an effort tier.
+`reasoning_effort` selects an effort level, not an exact reasoning-token budget.
 
 Function names use 1–64 letters/digits/underscores/hyphens. Call IDs use 1–256 of
 the same characters and must be unique in the replayed history. Tool results must
@@ -114,6 +129,23 @@ never relayed. Auth errors use 401, unsupported inputs 400/415, size errors 413,
 overload 429, unavailable readiness 503, upstream/verification/shape errors 502,
 and elapsed/cancelled request contexts 504 where the connection is still writable.
 
+## Thinking controls through routers
+
+Hermes v0.22.5's default custom-provider request uses `reasoning_effort: medium`.
+9router v0.5.111 can translate Qwen effort levels into top-level `enable_thinking`
+and `thinking_budget`, even when its provider override is Auto. The boolean alias
+is accepted; a generated numeric budget still receives the specific rejection
+above. Supporting the alias does not establish support for these budget presets.
+Conflicting top-level and nested toggles receive a fixed field-specific error.
+Other unsupported fields retain the general `unsupported_request` response.
+Request values, arbitrary field names and raw decoder errors are never reflected.
+
+To avoid the budget translation while requesting thinking, configure the matching
+Hermes custom provider's `extra_body` with `reasoning_effort: null` and
+`chat_template_kwargs: {enable_thinking: true}`, and leave the 9router provider
+override on Auto. Use `false` for the nested boolean to request thinking off.
+The proxy does not execute tools on behalf of these clients.
+
 ## What was actually tested
 
 Container regression tests run the built Linux AMD64 and ARM64 images with
@@ -134,7 +166,14 @@ overload, cancellation, strict evidence policy, receipt failure before tool rele
 provisional text flushing, fragmented tool assembly, SSE truncation/limits and
 dependency encryption/signature contracts.
 
+Offline HTTP regressions cover the top-level thinking alias for JSON and SSE,
+canonical normalization, conflicting controls, strict type/duplicate/unknown-field
+rejection, safe budget errors and preservation of real SDK prompt encryption.
+Investigation requests through 9router v0.5.111 covered basic JSON and an explicit
+null reasoning override. The new alias normalization has not been live-tested;
+a full Hermes conversation and its tool lifecycle have not been integration-tested.
+
 No particular LiteLLM, Hermes, OpenCode, Orion, OpenAI SDK or external bridge version
-has been integration-tested. Configure a custom Chat Completions provider using
+has full client integration coverage. Configure a custom Chat Completions provider using
 the base URL/key/model from README.md and report rejected required fields before
 expanding the contract. Responses support is deferred; it is not forwarded to NEAR.
