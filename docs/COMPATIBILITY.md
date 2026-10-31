@@ -35,7 +35,12 @@ request.
 - `max_tokens` or `max_completion_tokens`, from 1 to 8,192; not both. Default:
   1,024 completion tokens. Only one choice (`n: 1`) is supported.
 - `reasoning_effort`: `none`, `minimal`, `low`, `medium`, `high`.
+- `thinking_budget`: integer from 0 to 32,768, forwarded unchanged. Null and
+  non-integer values are rejected. Its meaning and support depend on the backend.
 - `chat_template_kwargs`: only boolean `enable_thinking`.
+- Top-level boolean `enable_thinking`: normalized to
+  `chat_template_kwargs.enable_thinking` before SDK encryption. If both are
+  supplied they must agree; null, other types and conflicting values fail locally.
 - `response_format`: only `text` or `json_object`.
 - `stream` and `stream_options.include_usage`.
 
@@ -49,6 +54,26 @@ hyphens, dots or slashes, starting with a letter/digit/underscore/hyphen; `..` i
 rejected. The SDK disables aliasing and verifies the requested model before
 inference. Missing/invalid confidential evidence fails with a safe 502 error;
 catalog availability alone never authorizes inference.
+
+The thinking toggle follows [NEAR's documented request
+format](https://docs.near.ai/cloud/reasoning-models). It controls on/off where the
+selected model supports it; the proxy does not promise that every model can
+disable thinking. The toggle remains observable boolean protocol metadata, like
+sampling settings. It never accepts arbitrary text.
+
+`thinking_budget` is a provider extension accepted for router compatibility. The
+proxy preserves it as numeric metadata through SDK encryption; it does not drop
+it, infer a thinking toggle, convert it into an output-token limit or approximate
+it with an effort tier. Invalid types and values return HTTP 400 with
+`error.param: "thinking_budget"` and a fixed range/type explanation.
+
+Acceptance does not guarantee that the selected backend honors this field or
+enforces an exact reasoning-token cap. A backend may ignore it or reject it;
+upstream failures still receive the proxy's safe error. NEAR documents different
+controls for different models, including a distinct `thinking_token_budget` field
+for GLM-5.3 Flash; this proxy does not rename `thinking_budget` to that field.
+`reasoning_effort` selects an effort level, not an exact reasoning-token budget.
+The existing completion-token limits and request deadline remain unchanged.
 
 Function names use 1–64 letters/digits/underscores/hyphens. Call IDs use 1–256 of
 the same characters and must be unique in the replayed history. Tool results must
@@ -114,6 +139,25 @@ never relayed. Auth errors use 401, unsupported inputs 400/415, size errors 413,
 overload 429, unavailable readiness 503, upstream/verification/shape errors 502,
 and elapsed/cancelled request contexts 504 where the connection is still writable.
 
+## Thinking controls through routers
+
+Hermes v0.22.5's default custom-provider request uses `reasoning_effort: medium`.
+9router v0.5.111 can translate Qwen effort levels into top-level `enable_thinking`
+and `thinking_budget`, even when its provider override is Auto. The proxy accepts
+these controls together: it normalizes the boolean alias and preserves the
+numeric budget. The low/medium/high/on budget values (1,024/8,192/24,576/10,000)
+fall within the accepted range. This removes their previous local rejection;
+the selected backend still determines the resulting reasoning behavior.
+Conflicting top-level and nested toggles receive a fixed field-specific error.
+Other unsupported fields retain the general `unsupported_request` response.
+Request values, arbitrary field names and raw decoder errors are never reflected.
+
+To bypass the router's budget translation while requesting thinking, configure
+the matching Hermes custom provider's `extra_body` with `reasoning_effort: null` and
+`chat_template_kwargs: {enable_thinking: true}`, and leave the 9router provider
+override on Auto. Use `false` for the nested boolean to request thinking off.
+The proxy does not execute tools on behalf of these clients.
+
 ## What was actually tested
 
 Container regression tests run the built Linux AMD64 and ARM64 images with
@@ -134,7 +178,17 @@ overload, cancellation, strict evidence policy, receipt failure before tool rele
 provisional text flushing, fragmented tool assembly, SSE truncation/limits and
 dependency encryption/signature contracts.
 
+Offline HTTP regressions cover the top-level thinking alias for JSON and SSE,
+canonical normalization, conflicting controls, strict type/duplicate/unknown-field
+rejection, budget forwarding/type/range errors and preservation of real SDK
+prompt encryption. Router low/medium/high/on payloads reach the synthetic backend
+in JSON and SSE tests without altering the completion-token limit.
+Investigation requests through 9router v0.5.111 covered basic JSON and an explicit
+null reasoning override. The new alias and budget handling have not been
+live-tested; a full Hermes conversation and its tool lifecycle have not been
+integration-tested.
+
 No particular LiteLLM, Hermes, OpenCode, Orion, OpenAI SDK or external bridge version
-has been integration-tested. Configure a custom Chat Completions provider using
+has full client integration coverage. Configure a custom Chat Completions provider using
 the base URL/key/model from README.md and report rejected required fields before
 expanding the contract. Responses support is deferred; it is not forwarded to NEAR.

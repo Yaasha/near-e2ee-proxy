@@ -78,6 +78,9 @@ func TestToolHistoryAndSchemaArePreserved(t *testing.T) {
 func FuzzRequestValidation(f *testing.F) {
 	f.Add([]byte(goodRequest))
 	f.Add([]byte(`{"model":"synthetic-model","messages":null}`))
+	f.Add([]byte(strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":true}`))
+	f.Add([]byte(strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":false,"chat_template_kwargs":{"enable_thinking":true}}`))
+	f.Add([]byte(strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":true,"thinking_budget":8192}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		if len(raw) > MaxRequestBytes {
 			return
