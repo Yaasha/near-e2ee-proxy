@@ -12,19 +12,23 @@ func (e *requestFieldError) Unwrap() error { return errInvalid }
 // normalizeThinking translates a reviewed client alias into NEAR's documented
 // toggle. Only a boolean is accepted: it remains observable protocol metadata,
 // like the existing nested toggle, and cannot carry arbitrary unencrypted text.
+// A bounded integer budget is also observable metadata and is forwarded unchanged,
+// with model-dependent semantics like reasoning_effort. Neither field carries text.
 // Unknown fields are preserved so the ordinary recursive allowlist rejects them.
 func normalizeThinking(raw []byte) ([]byte, error) {
 	var request map[string]json.RawMessage
 	if json.Unmarshal(raw, &request) != nil {
 		return nil, errInvalid
 	}
-	if _, exists := request["thinking_budget"]; exists {
-		// An effort tier is not an exact token cap. Do not silently drop a budget,
-		// turn it into a generation cap, or invent an unsupported backend mapping.
-		return nil, &requestFieldError{
-			param:   "thinking_budget",
-			message: "thinking_budget is unsupported: an exact reasoning-token cap cannot be guaranteed. Omit it and use reasoning_effort or chat_template_kwargs.enable_thinking.",
+	if rawBudget, exists := request["thinking_budget"]; exists {
+		var budget *int
+		if json.Unmarshal(rawBudget, &budget) != nil || budget == nil || *budget < 0 || *budget > 32768 {
+			return nil, &requestFieldError{
+				param: "thinking_budget", message: "thinking_budget must be an integer from 0 to 32768.",
+			}
 		}
+		// Preserve the budget even when thinking is off. Do not infer a toggle,
+		// approximate it with an effort tier, or enlarge the completion limit.
 	}
 	alias, exists := request["enable_thinking"]
 	if !exists {

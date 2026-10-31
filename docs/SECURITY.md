@@ -87,10 +87,13 @@ of a long-lived recipient model key.
 The top-level `enable_thinking` alias accepts only a boolean and normalizes to
 `chat_template_kwargs.enable_thinking` before the request reaches the SDK. This
 control remains observable protocol metadata; prompts and tool data retain the
-existing encryption requirements. Conflicting controls fail locally. Numeric
-`thinking_budget` is rejected with a fixed public field name and explanation,
-because silently approximating or dropping a requested cap would change its
-meaning. Validation errors never include values or arbitrary field names.
+existing encryption requirements. Conflicting controls fail locally. The
+`thinking_budget` extension accepts only integers from 0 to 32,768 and remains
+observable numeric metadata through the SDK. It cannot carry arbitrary text or
+objects. The proxy forwards the budget unchanged; backend support and enforcement
+are model-dependent. It never changes completion-token limits or request
+deadlines in response to a budget. Invalid controls receive fixed public field
+names and explanations; errors never include values or arbitrary field names.
 
 Local HTTP is appropriate for loopback. Use HTTPS or an encrypted tunnel when
 traffic crosses other machines. Avoid HTTP debug dumps, request-body capture and

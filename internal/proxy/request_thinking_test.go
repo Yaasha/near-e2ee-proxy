@@ -65,7 +65,62 @@ func TestThinkingAliasReachesBackendInCanonicalForm(t *testing.T) {
 	}
 }
 
-func TestThinkingAliasRejectsAmbiguityAndUnsupportedBudgets(t *testing.T) {
+func TestThinkingBudgetReachesBackendIntact(t *testing.T) {
+	for name, extra := range map[string]string{
+		"router low":    `,"enable_thinking":true,"thinking_budget":1024`,
+		"router medium": `,"enable_thinking":true,"thinking_budget":8192`,
+		"router high":   `,"enable_thinking":true,"thinking_budget":24576`,
+		"router on":     `,"enable_thinking":true,"thinking_budget":10000`,
+		"while off":     `,"enable_thinking":false,"thinking_budget":1024`,
+		"zero":          `,"thinking_budget":0`,
+		"maximum":       `,"thinking_budget":32768`,
+		"with effort":   `,"reasoning_effort":"medium","thinking_budget":8192`,
+	} {
+		for _, stream := range []bool{false, true} {
+			mode := "json"
+			if stream {
+				mode = "sse"
+			}
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				input := strings.TrimSuffix(goodRequest, "}") + extra + `,"max_completion_tokens":64`
+				if stream {
+					input += `,"stream":true`
+				}
+				input += "}"
+				var original map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(input), &original); err != nil {
+					t.Fatal(err)
+				}
+				backend := &fakeBackend{complete: func(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+					var forwarded map[string]json.RawMessage
+					if json.Unmarshal(raw, &forwarded) != nil || !bytes.Equal(forwarded["thinking_budget"], original["thinking_budget"]) || !bytes.Equal(forwarded["reasoning_effort"], original["reasoning_effort"]) {
+						t.Fatal("preserve the numeric budget and effort without dropping or approximating them")
+					}
+					if string(forwarded["max_completion_tokens"]) != "64" || forwarded["max_tokens"] != nil {
+						t.Fatal("a reasoning budget must not replace or enlarge the completion limit")
+					}
+					if enabled, exists := original["enable_thinking"]; exists {
+						var template map[string]json.RawMessage
+						if json.Unmarshal(forwarded["chat_template_kwargs"], &template) != nil || !bytes.Equal(template["enable_thinking"], enabled) || forwarded["enable_thinking"] != nil {
+							t.Fatal("preserve the router toggle in canonical form alongside its budget")
+						}
+					}
+					return json.RawMessage(goodAnswer), nil
+				}}
+				w := httptest.NewRecorder()
+				testServer(backend).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+				if w.Code != 200 || backend.calls.Load() != 1 {
+					t.Fatalf("valid router controls must reach the backend once; got HTTP %d", w.Code)
+				}
+				if stream && !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
+					t.Fatal("budget requests must retain verified stream completion")
+				}
+			})
+		}
+	}
+}
+
+func TestThinkingAliasRejectsAmbiguityAndInvalidBudgets(t *testing.T) {
 	for name, test := range map[string]struct {
 		extra, param, message string
 	}{
@@ -78,10 +133,15 @@ func TestThinkingAliasRejectsAmbiguityAndUnsupportedBudgets(t *testing.T) {
 		"null template":         {`,"enable_thinking":true,"chat_template_kwargs":null`, "chat_template_kwargs", "chat_template_kwargs must be an object when enable_thinking is specified."},
 		"scalar template":       {`,"enable_thinking":true,"chat_template_kwargs":"private-value"`, "chat_template_kwargs", "chat_template_kwargs must be an object when enable_thinking is specified."},
 		"invalid nested toggle": {`,"enable_thinking":true,"chat_template_kwargs":{"enable_thinking":null}`, "chat_template_kwargs.enable_thinking", "chat_template_kwargs.enable_thinking must be a boolean."},
-		"router medium budget":  {`,"enable_thinking":true,"thinking_budget":8192`, "thinking_budget", "thinking_budget is unsupported: an exact reasoning-token cap cannot be guaranteed. Omit it and use reasoning_effort or chat_template_kwargs.enable_thinking."},
-		"budget while off":      {`,"enable_thinking":false,"thinking_budget":1024`, "thinking_budget", "thinking_budget is unsupported: an exact reasoning-token cap cannot be guaranteed. Omit it and use reasoning_effort or chat_template_kwargs.enable_thinking."},
-		"private budget":        {`,"thinking_budget":"private-value"`, "thinking_budget", "thinking_budget is unsupported: an exact reasoning-token cap cannot be guaranteed. Omit it and use reasoning_effort or chat_template_kwargs.enable_thinking."},
-		"null budget":           {`,"thinking_budget":null`, "thinking_budget", "thinking_budget is unsupported: an exact reasoning-token cap cannot be guaranteed. Omit it and use reasoning_effort or chat_template_kwargs.enable_thinking."},
+		"private budget":        {`,"thinking_budget":"private-value"`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"null budget":           {`,"thinking_budget":null`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"negative budget":       {`,"thinking_budget":-1`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"large budget":          {`,"thinking_budget":32769`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"fractional budget":     {`,"thinking_budget":1.5`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"overflow budget":       {`,"thinking_budget":999999999999999999999999999999999`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"boolean budget":        {`,"thinking_budget":true`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"object budget":         {`,"thinking_budget":{"private-name":"private-value"}`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"array budget":          {`,"thinking_budget":["private-value"]`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
 	} {
 		t.Run(name, func(t *testing.T) {
 			backend := &fakeBackend{}
@@ -117,6 +177,9 @@ func TestThinkingNormalizationKeepsStrictJSONValidation(t *testing.T) {
 		"duplicate nested":  `,"enable_thinking":true,"chat_template_kwargs":{"enable_thinking":true,"enable_thinking":false}`,
 		"wrong casing":      `,"Enable_Thinking":true`,
 		"duplicate budget":  `,"thinking_budget":8192,"thinking_budget":1024`,
+		"budget extension":  `,"thinking_budget":8192,"private-name":"private-value"`,
+		"budget casing":     `,"Thinking_Budget":8192`,
+		"nested budget":     `,"chat_template_kwargs":{"thinking_budget":8192}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			backend := &fakeBackend{}
@@ -140,7 +203,7 @@ func TestThinkingAliasPreservesSDKEncryption(t *testing.T) {
 	}
 	for _, enabled := range []string{"true", "false"} {
 		t.Run(enabled, func(t *testing.T) {
-			input := strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":` + enabled + "}"
+			input := strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":` + enabled + `,"thinking_budget":8192}`
 			parsed, err := parseRequest([]byte(input))
 			if err != nil {
 				t.Fatal("supported thinking alias must parse")
@@ -165,7 +228,10 @@ func TestThinkingAliasPreservesSDKEncryption(t *testing.T) {
 			}
 			var template map[string]json.RawMessage
 			if json.Unmarshal(fields["chat_template_kwargs"], &template) != nil || string(template["enable_thinking"]) != enabled || fields["enable_thinking"] != nil {
-				t.Fatal("only the canonical boolean control may remain visible to upstream routing")
+				t.Fatal("the toggle must use its canonical field alongside the budget")
+			}
+			if string(fields["thinking_budget"]) != "8192" {
+				t.Fatal("the real SDK must preserve the reviewed numeric budget as observable metadata")
 			}
 			if prepared.Request.Header.Get("X-Encryption-Version") != "2" || prepared.Request.Header.Get("X-Encrypt-All-Fields") != "true" {
 				t.Fatal("thinking aliases must preserve expanded model-key E2EE")

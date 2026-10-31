@@ -26,6 +26,7 @@ type Request struct {
 	Seed                *int64          `json:"seed,omitempty"`
 	N                   *int            `json:"n,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	ThinkingBudget      *int            `json:"thinking_budget,omitempty"`
 	ChatTemplate        *Template       `json:"chat_template_kwargs,omitempty"`
 	ResponseFormat      *Format         `json:"response_format,omitempty"`
 	Stream              bool            `json:"stream,omitempty"`
@@ -92,7 +93,7 @@ func (r *Request) UnmarshalJSON(b []byte) error {
 	if err != nil {
 		return err
 	}
-	return fields(normalized, (*plain)(r), "model messages tools tool_choice parallel_tool_calls temperature top_p frequency_penalty presence_penalty max_tokens max_completion_tokens seed n reasoning_effort chat_template_kwargs response_format stream stream_options")
+	return fields(normalized, (*plain)(r), "model messages tools tool_choice parallel_tool_calls temperature top_p frequency_penalty presence_penalty max_tokens max_completion_tokens seed n reasoning_effort thinking_budget chat_template_kwargs response_format stream stream_options")
 }
 func (m *Message) UnmarshalJSON(b []byte) error {
 	type plain Message
