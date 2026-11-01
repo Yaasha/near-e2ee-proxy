@@ -123,6 +123,7 @@ including the first-publication visibility requirement and anonymous-pull checks
 | `MODELS` | Models advertised by `/v1/models` and probed by `/readyz`; default `Qwen/Qwen3.8-27B`; at most eight |
 | `MAX_BODY_BYTES` | Shared local/SDK body capacity in bytes; omitted or `0` uses the SDK's 64 MiB default; increase for larger encrypted requests/responses |
 | `REQUEST_TIMEOUT` | Optional inference deadline such as `30m`; omitted or `0` leaves lifetime to the caller and upstream |
+| `WRITE_TIMEOUT` | Bound for each response write/flush; omitted or `0` uses `30s`. Time waiting for generation or an upload does not count |
 
 `MODELS` is a discovery/readiness list, not an allowlist. Authenticated requests
 can select other canonical model IDs, each verified before inference. Readiness
@@ -134,8 +135,11 @@ or substitute a smaller output budget. The backend validates model-dependent
 sampling ranges. Byte limits, four active HTTP operations and verification caches
 bound resource use; larger body settings require more memory. The SDK retains exact
 encrypted bytes for model receipts, with a combined cache budget of eight times
-`MAX_BODY_BYTES`. `REQUEST_TIMEOUT` is opt-in; a stalled request can otherwise
-occupy a slot until its caller cancels or the upstream connection ends.
+`MAX_BODY_BYTES`. `REQUEST_TIMEOUT` is opt-in; a request waiting for upload or
+upstream output can otherwise occupy a slot until cancellation or disconnection.
+Individual response writes have a renewable `WRITE_TIMEOUT` bound and are
+interrupted by request cancellation. HTTP/1 requests whose bodies are rejected or
+ignored close their connections without waiting to drain incomplete bodies.
 
 Mise's development tasks load all settings in `.env`, so it can also contain
 `LISTEN_ADDR`, `MODELS` or the proxy-key settings. See [mise's task-specific

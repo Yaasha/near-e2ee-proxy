@@ -109,8 +109,10 @@ disable response buffering in your reverse proxy if you want incremental display
 
 SSE responses carry `X-Response-Verification: end-of-stream`, an informational
 header, not a proof clients verify themselves. After text starts, failures use
-`event: error` with a fixed OpenAI-shaped error and close without a finish event or
-`[DONE]`; the HTTP status is already 200. Clients must handle this as failure.
+`event: error` with a fixed OpenAI-shaped error when the connection is writable,
+and close without a finish event or `[DONE]`; the HTTP status is already 200.
+Write timeouts may close the connection before an error frame can be delivered.
+Clients must handle either case as failure.
 Before any SSE output, failures use ordinary JSON HTTP errors. Standard clients
 may already act on provisional text; see [the tradeoff](SECURITY.md#streaming-tradeoff).
 
@@ -148,14 +150,23 @@ Response ID and model must remain the same. Other unknown output fields are reje
 | Attestation cache | Five minutes |
 | Receipt retention | One minute after capture |
 | Inference deadline | No default proxy deadline; optional `REQUEST_TIMEOUT` or caller deadline |
+| Response write/flush | `WRITE_TIMEOUT`; omitted or `0` uses 30 seconds per operation, shortened by any request deadline/cancellation |
 | Readiness deadline | Three minutes; independent of inference |
 
 The limits bound individual buffers and caches, not total process RAM. Verification
 libraries and concurrent callers need additional memory. Raising `MAX_BODY_BYTES`
 also raises exact-wire capture and cache memory budgets. Encryption overhead counts
 toward the SDK body capacity; it is not a token or context-window limit. An omitted
-inference timeout allows a stalled authenticated request to occupy a concurrency
-slot until cancellation or connection failure. The SDK's shared
+inference timeout allows an authenticated upload or upstream wait to occupy a
+concurrency slot until cancellation or connection failure. A blocked response
+write/flush instead ends at `WRITE_TIMEOUT` or the request deadline/cancellation,
+whichever comes first. The write bound is disarmed between successful operations
+so HTTP/1 and HTTP/2 generation pauses do not consume it. The final buffered HTTP
+flush is bounded as well. HTTP/1 bodies rejected before consumption (including
+authentication, routing, media-type and overload failures) are not drained for
+keep-alive: their connection is closed and body reads are expired. Authenticated,
+admitted uploads clear that rejection deadline and retain caller-controlled
+lifetime. The SDK's shared
 verification work can briefly outlive a cancelled caller, with its own bounded
 deadline; closing the client cancels it. Raw upstream errors are
 never relayed. Auth errors use 401, unsupported inputs 400/415, size errors 413,
@@ -207,6 +218,9 @@ Offline tests also cover caller-controlled deadlines, optional configured timeou
 custom body limits, contexts over 1 MiB, answers/events over 8 MiB, histories over
 1,024 messages and tool sets over 128 calls. These checks use synthetic backends;
 the larger budgets and removed inference deadline have not been live-tested.
+Transport regressions cover incomplete fixed-length/chunked rejected bodies,
+nonreading JSON/SSE clients, blocked flushes, request cancellation, accepted slow
+uploads and HTTP/1/HTTP/2 generation pauses beyond the per-write timeout.
 
 Offline HTTP regressions cover the top-level thinking alias for JSON and SSE,
 canonical normalization, conflicting controls, strict type/duplicate/unknown-field

@@ -19,6 +19,7 @@ type Config struct {
 	Models         []string      // Advertised by /v1/models and probed by /readyz; not a restriction.
 	MaxBodyBytes   int64         // Zero selects the SDK default for local and encrypted bodies.
 	RequestTimeout time.Duration // Zero leaves inference lifetime to the caller.
+	WriteTimeout   time.Duration // Zero selects the per-write transport timeout.
 }
 
 // LoadConfig reads only process environment. Mise (in development) or the
@@ -70,6 +71,12 @@ func LoadConfig() (Config, error) {
 		config.RequestTimeout, err = time.ParseDuration(value)
 		if err != nil || config.RequestTimeout < 0 {
 			return Config{}, errors.New("REQUEST_TIMEOUT must be a nonnegative duration, such as 10m; 0 disables the proxy inference deadline")
+		}
+	}
+	if value := os.Getenv("WRITE_TIMEOUT"); value != "" {
+		config.WriteTimeout, err = time.ParseDuration(value)
+		if err != nil || config.WriteTimeout < 0 {
+			return Config{}, errors.New("WRITE_TIMEOUT must be a nonnegative duration; 0 selects the default per-write timeout")
 		}
 	}
 	return config, nil

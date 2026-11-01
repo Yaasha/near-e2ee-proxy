@@ -104,9 +104,18 @@ continuation or retry. Clients can set explicit completion limits to control
 generation and cost.
 
 Inference has no default proxy wall deadline: it honors caller cancellation and
-any opt-in `REQUEST_TIMEOUT`. An authenticated stalled request can occupy a slot
-until cancelled or disconnected. Header-read, between-request idle, readiness and
-SDK verification deadlines remain independent. Local body/SSE bounds share the
+any opt-in `REQUEST_TIMEOUT`. An authenticated upload or upstream wait can occupy
+a slot until cancelled or disconnected. Each active response write/flush is
+bounded by `WRITE_TIMEOUT` (30 seconds by default), shortened by a request deadline
+and interrupted on cancellation. Successful writes disarm that bound between
+operations, preserving long generation pauses on HTTP/1 and HTTP/2. Final buffered
+HTTP writes remain bounded. A failed write cancels inference; it cannot authorize
+successful completion, and an unwritable connection may prevent error delivery.
+HTTP/1 request bodies rejected or ignored before consumption close their
+connections with expired body-read deadlines, preventing Go's automatic drain
+from retaining unauthenticated sockets/goroutines. Accepted uploads clear that
+rejection deadline. Header-read, between-request idle, readiness and SDK
+verification deadlines remain independent. Local body/SSE bounds share the
 SDK's 64 MiB default capacity, adjustable through `MAX_BODY_BYTES`; encrypted wire
 overhead counts toward that capacity. Receipt cache capacity is eight body limits
 to accommodate four concurrent request/response pairs. These finite byte and

@@ -82,8 +82,9 @@ func newHTTPServer(config proxy.Config, backend proxy.Backend) *http.Server {
 	return &http.Server{
 		Handler: proxy.NewServer(config, backend), ReadHeaderTimeout: 5 * time.Second,
 		// A server-wide WriteTimeout would cut off a healthy long inference.
-		// Caller cancellation and the optional configured request timeout govern
-		// active requests; IdleTimeout only bounds time between requests.
+		// The handler bounds individual writes and closes unread request bodies.
+		// Caller cancellation and optional REQUEST_TIMEOUT govern inference;
+		// IdleTimeout only bounds time between requests.
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
 	}
 }

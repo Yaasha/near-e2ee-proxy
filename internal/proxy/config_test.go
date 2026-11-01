@@ -13,6 +13,7 @@ func TestConfigValidation(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", "")
 	t.Setenv("MAX_BODY_BYTES", "")
 	t.Setenv("REQUEST_TIMEOUT", "")
+	t.Setenv("WRITE_TIMEOUT", "")
 	c, err := LoadConfig()
 	if err != nil || c.Listen != "127.0.0.1:8080" || len(c.Models) != 1 || c.NearKey != "synthetic-near-key" || c.ProxyKey != testKey {
 		t.Fatal("expected safe defaults")
@@ -49,20 +50,23 @@ func TestConfigOperationalLimits(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", "")
 	t.Setenv("MAX_BODY_BYTES", "")
 	t.Setenv("REQUEST_TIMEOUT", "")
+	t.Setenv("WRITE_TIMEOUT", "")
 	c, err := LoadConfig()
-	if err != nil || c.MaxBodyBytes != 0 || c.RequestTimeout != 0 {
+	if err != nil || c.MaxBodyBytes != 0 || c.RequestTimeout != 0 || c.WriteTimeout != 0 {
 		t.Fatal("defaults must use SDK body capacity and leave inference lifetime to callers")
 	}
 	t.Setenv("MAX_BODY_BYTES", "268435456")
 	t.Setenv("REQUEST_TIMEOUT", "30m")
+	t.Setenv("WRITE_TIMEOUT", "45s")
 	c, err = LoadConfig()
-	if err != nil || c.MaxBodyBytes != 256<<20 || c.RequestTimeout != 30*time.Minute {
+	if err != nil || c.MaxBodyBytes != 256<<20 || c.RequestTimeout != 30*time.Minute || c.WriteTimeout != 45*time.Second {
 		t.Fatal("operators must be able to raise body limits and choose a deadline")
 	}
 	for _, test := range []struct{ key, value string }{
 		{"MAX_BODY_BYTES", "-1"}, {"MAX_BODY_BYTES", "1.5"},
 		{"MAX_BODY_BYTES", "9223372036854775807"}, {"MAX_BODY_BYTES", "private-marker"},
 		{"REQUEST_TIMEOUT", "-1s"}, {"REQUEST_TIMEOUT", "10"}, {"REQUEST_TIMEOUT", "private-marker"},
+		{"WRITE_TIMEOUT", "-1s"}, {"WRITE_TIMEOUT", "10"}, {"WRITE_TIMEOUT", "private-marker"},
 	} {
 		t.Run(test.key, func(t *testing.T) {
 			t.Setenv(test.key, test.value)
@@ -73,7 +77,8 @@ func TestConfigOperationalLimits(t *testing.T) {
 	}
 	t.Setenv("MAX_BODY_BYTES", "0")
 	t.Setenv("REQUEST_TIMEOUT", "0")
-	if c, err := LoadConfig(); err != nil || c.MaxBodyBytes != 0 || c.RequestTimeout != 0 {
+	t.Setenv("WRITE_TIMEOUT", "0")
+	if c, err := LoadConfig(); err != nil || c.MaxBodyBytes != 0 || c.RequestTimeout != 0 || c.WriteTimeout != 0 {
 		t.Fatal("explicit zero must select SDK body capacity and disable the proxy deadline")
 	}
 }

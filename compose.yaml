@@ -9,6 +9,7 @@ services:
       NEAR_AI_API_KEY: ${NEAR_AI_API_KEY:?Supply NEAR_AI_API_KEY in the process environment}
       PROXY_API_KEY: ${PROXY_API_KEY:?Supply a separate PROXY_API_KEY in the process environment}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-0}
+      WRITE_TIMEOUT: ${WRITE_TIMEOUT:-0}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-0}
     read_only: true
     cap_drop:
