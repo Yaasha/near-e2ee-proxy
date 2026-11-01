@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"near-e2ee-proxy/internal/limits"
 )
 
-const MaxRequestBytes = 1 << 20
-const MaxResponseBytes = 8 << 20
-const RequestTimeout = 180 * time.Second
+// Defaults used by offline/live harnesses; active handlers use config.MaxBodyBytes.
+const MaxRequestBytes = limits.DefaultBodyBytes
+const MaxResponseBytes = limits.DefaultBodyBytes
 
 // Backend is small so HTTP behavior can be tested offline. The production
 // implementation verifies receipts before completion. Stream callbacks carry
@@ -27,15 +29,22 @@ type Backend interface {
 }
 
 type Server struct {
-	backend       Backend
-	keyHash       [32]byte
-	keyConfigured bool
-	models        []string
-	slots         chan struct{}
+	backend        Backend
+	keyHash        [32]byte
+	keyConfigured  bool
+	models         []string
+	maxBodyBytes   int64
+	requestTimeout time.Duration
+	slots          chan struct{}
 }
 
 func NewServer(config Config, backend Backend) *Server {
-	return &Server{backend: backend, keyHash: sha256.Sum256([]byte(config.ProxyKey)), keyConfigured: len(config.ProxyKey) >= 32 && len(config.ProxyKey) <= 256, models: append([]string(nil), config.Models...), slots: make(chan struct{}, 4)}
+	return &Server{
+		backend: backend, keyHash: sha256.Sum256([]byte(config.ProxyKey)),
+		keyConfigured: len(config.ProxyKey) >= 32 && len(config.ProxyKey) <= 256,
+		models:        append([]string(nil), config.Models...), slots: make(chan struct{}, 4),
+		maxBodyBytes: limits.BodyBytes(config.MaxBodyBytes), requestTimeout: config.RequestTimeout,
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +85,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "rate_limit_error", "overloaded", "The proxy is at its concurrency limit.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), RequestTimeout)
-	defer cancel()
+	ctx := r.Context()
+	timeout := s.requestTimeout
+	if r.Method == http.MethodGet {
+		// Readiness is bounded independently of potentially long inference.
+		timeout = 3 * time.Minute
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	if r.Method == http.MethodGet {
 		models := make([]any, 0, len(s.models))
 		for _, model := range s.models {
@@ -119,13 +137,16 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		writeError(w, 415, "invalid_request_error", "unsupported_media_type", "Use uncompressed application/json with UTF-8 text.")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	defer r.Body.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = http.NewResponseController(w).SetReadDeadline(deadline)
+	}
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		var size *http.MaxBytesError
 		if errors.As(err, &size) {
-			writeError(w, 413, "invalid_request_error", "request_too_large", "The request exceeds the 1 MiB limit.")
+			writeError(w, 413, "invalid_request_error", "request_too_large", "The request exceeds the configured body size limit.")
 		} else {
 			writeError(w, 400, "invalid_request_error", "invalid_body", "Cannot read the request body.")
 		}
@@ -155,7 +176,7 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	answer, err := s.backend.Complete(ctx, upstream)
-	if err != nil || len(answer) > MaxResponseBytes {
+	if err != nil || int64(len(answer)) > s.maxBodyBytes {
 		if ctx.Err() != nil {
 			writeError(w, 504, "server_error", "request_timeout", "The inference deadline expired or the request was cancelled.")
 		} else {

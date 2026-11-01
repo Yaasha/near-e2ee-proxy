@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"near-e2ee-proxy/internal/limits"
+
 	nearai "github.com/nearai/inference-sdk/go"
 )
 
@@ -28,27 +30,30 @@ type sdkClient interface {
 }
 
 type Client struct {
-	sdk       sdkClient
-	transport *http.Transport
+	sdk          sdkClient
+	transport    *http.Transport
+	maxBodyBytes int64
 }
 
 // New fixes the upstream URL and security settings. Clients cannot override
 // routing, verification, credentials, encryption keys or encryption headers.
-func New(apiKey string) (*Client, error) {
-	if apiKey == "" {
+func New(apiKey string, maxBodyBytes int64) (*Client, error) {
+	if apiKey == "" || !limits.ValidBodyBytes(maxBodyBytes) {
 		return nil, ErrVerification
 	}
+	maxBodyBytes = limits.BodyBytes(maxBodyBytes)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	client, err := nearai.NewInferenceClient(options(apiKey, transport))
+	client, err := nearai.NewInferenceClient(options(apiKey, transport, maxBodyBytes))
 	if err != nil {
 		transport.CloseIdleConnections()
 		return nil, ErrVerification
 	}
-	return &Client{sdk: client, transport: transport}, nil
+	return &Client{sdk: client, transport: transport, maxBodyBytes: maxBodyBytes}, nil
 }
 
-func options(apiKey string, transport *http.Transport) nearai.InferenceOptions {
+func options(apiKey string, transport *http.Transport, maxBodyBytes int64) nearai.InferenceOptions {
+	maxBodyBytes = limits.BodyBytes(maxBodyBytes)
 	ttl, retention := 5*time.Minute, time.Minute
 	quote := nearai.CreateTDXQuoteVerifier("")
 	// The SDK checks signatures, collateral, debug mode and TCB status. Add an
@@ -63,11 +68,13 @@ func options(apiKey string, transport *http.Transport) nearai.InferenceOptions {
 	return nearai.InferenceOptions{
 		ClientOptions: nearai.ClientOptions{
 			APIKey: apiKey, BaseURL: nearai.DefaultBaseURL,
-			HTTPClient: &http.Client{Transport: transport, Timeout: 180 * time.Second},
+			// Admission and receipt verification have their own SDK deadlines.
+			// Inference lifetime follows the caller's context, not a wall timer.
+			HTTPClient: &http.Client{Transport: transport},
 		},
 		E2EE: true, SigningAlgo: nearai.Ed25519,
 		AttestationTTL: &ttl, ResponseTTL: &retention,
-		MaxBodyBytes: 32 << 20, MaxCacheEntries: 16, MaxReceiptCacheBytes: 128 << 20,
+		MaxBodyBytes: maxBodyBytes, MaxCacheEntries: 16, MaxReceiptCacheBytes: 8 * maxBodyBytes,
 		GatewayVerification: nearai.VerificationOptions{
 			Policy: nearai.AttestationPolicy{AcceptedTCBStatuses: []string{"UpToDate"}}, QuoteVerifier: checkQuote,
 		},

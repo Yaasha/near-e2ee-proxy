@@ -148,7 +148,7 @@ func TestReceiptRetryHonorsCancellation(t *testing.T) {
 }
 
 func TestProductionOptionsKeepSecurityEnabled(t *testing.T) {
-	o := options("synthetic-key", http.DefaultTransport.(*http.Transport).Clone())
+	o := options("synthetic-key", http.DefaultTransport.(*http.Transport).Clone(), 0)
 	if !o.E2EE || o.DisableTLSBinding || o.SigningAlgo != nearai.Ed25519 || !o.ModelVerification.Policy.RequireGPUEvidence {
 		t.Fatal("mandatory security settings missing")
 	}
@@ -159,5 +159,12 @@ func TestProductionOptionsKeepSecurityEnabled(t *testing.T) {
 	}
 	if o.ClientOptions.BaseURL != nearai.DefaultBaseURL || o.AttestationTTL == nil || *o.AttestationTTL <= 0 || o.ResponseTTL == nil || *o.ResponseTTL <= 0 {
 		t.Fatal("routing or cache safety settings missing")
+	}
+	if o.HTTPClient.Timeout != 0 || o.MaxBodyBytes != 64<<20 || o.MaxReceiptCacheBytes < 8*o.MaxBodyBytes {
+		t.Fatal("use SDK body capacity without a client wall timeout, with room for four receipt pairs")
+	}
+	o = options("synthetic-key", http.DefaultTransport.(*http.Transport).Clone(), 256<<20)
+	if o.MaxBodyBytes != 256<<20 || o.MaxReceiptCacheBytes < 8*o.MaxBodyBytes {
+		t.Fatal("configured body capacity must reach the SDK and its receipt cache")
 	}
 }

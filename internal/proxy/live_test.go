@@ -28,7 +28,7 @@ func TestLiveChatProxy(t *testing.T) {
 	if key == "" {
 		t.Fatal("cannot load live-test credential")
 	}
-	backend, err := near.New(key)
+	backend, err := near.New(key, 0)
 	if err != nil {
 		t.Fatal("cannot initialize NEAR client")
 	}
@@ -38,14 +38,15 @@ func TestLiveChatProxy(t *testing.T) {
 	// SDK must admit that requested model rather than consulting a static gate.
 	server := httptest.NewServer(NewServer(Config{ProxyKey: testKey, Models: []string{"synthetic-discovery-entry"}}, backend))
 	defer server.Close()
-	client := &http.Client{Timeout: RequestTimeout + time.Second}
+	const liveTimeout = 3 * time.Minute
+	client := &http.Client{Timeout: liveTimeout + time.Second}
 	post := func(t *testing.T, input map[string]any) []byte {
 		t.Helper()
 		input["model"] = model
 		input["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 		input["max_completion_tokens"] = 128
 		raw, _ := json.Marshal(input)
-		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
 		defer cancel()
 		r, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/chat/completions", bytes.NewReader(raw))
 		r.Header.Set("Authorization", "Bearer "+testKey)

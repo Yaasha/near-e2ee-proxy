@@ -67,9 +67,14 @@ versions have not been tested; see [the supported contract](docs/COMPATIBILITY.m
 Codex needs Responses support or an existing external adapter.
 
 The proxy also accepts top-level boolean `enable_thinking` and translates it to
-the nested form shown above. Integer `thinking_budget` values from 0 to 32,768
-are forwarded unchanged as a model-dependent parameter; see
+the nested form shown above. Nonnegative integer `thinking_budget` values
+are forwarded unchanged without a proxy token ceiling as a model-dependent parameter; see
 [router thinking controls](docs/COMPATIBILITY.md#thinking-controls-through-routers).
+
+Set `max_completion_tokens` to budget both reasoning and the final answer. The
+proxy preserves explicit positive token limits and leaves omitted limits to the
+backend. There is no default proxy inference deadline. Body capacity defaults to
+the SDK's 64 MiB and can be raised with `MAX_BODY_BYTES`.
 
 Choose a model in each request's `model` field using its canonical NEAR ID. It
 does not need to appear in the proxy's configured discovery list. The selected
@@ -83,7 +88,8 @@ and input encryption stay mandatory. Tool calls, finish reasons, usage and `[DON
 wait for the final model signature. A failed check emits a stream error without a
 successful completion marker; text already consumed cannot be retracted. JSON
 responses remain fully verified before delivery. Cold attestation still delays
-the first request; allow up to three minutes overall. See [streaming security](docs/SECURITY.md#streaming-tradeoff).
+the first request. Caller cancellation is honored; an optional `REQUEST_TIMEOUT`
+can set an operator-selected deadline. See [streaming security](docs/SECURITY.md#streaming-tradeoff).
 
 ## Containers
 
@@ -115,11 +121,21 @@ including the first-publication visibility requirement and anonymous-pull checks
 | `PROXY_API_KEY` | Inbound shared token, 32–256 non-whitespace ASCII characters |
 | `LISTEN_ADDR` | Default `127.0.0.1:8080` for the standalone binary; `0.0.0.0:8080` in the image |
 | `MODELS` | Models advertised by `/v1/models` and probed by `/readyz`; default `Qwen/Qwen3.8-27B`; at most eight |
+| `MAX_BODY_BYTES` | Shared local/SDK body capacity in bytes; omitted or `0` uses the SDK's 64 MiB default; increase for larger encrypted requests/responses |
+| `REQUEST_TIMEOUT` | Optional inference deadline such as `30m`; omitted or `0` leaves lifetime to the caller and upstream |
 
 `MODELS` is a discovery/readiness list, not an allowlist. Authenticated requests
 can select other canonical model IDs, each verified before inference. Readiness
 checks the configured entries only; it does not guarantee availability of every
 other model.
+
+The proxy does not cap completion/thinking tokens, message count or tool count,
+or substitute a smaller output budget. The backend validates model-dependent
+sampling ranges. Byte limits, four active HTTP operations and verification caches
+bound resource use; larger body settings require more memory. The SDK retains exact
+encrypted bytes for model receipts, with a combined cache budget of eight times
+`MAX_BODY_BYTES`. `REQUEST_TIMEOUT` is opt-in; a stalled request can otherwise
+occupy a slot until its caller cancels or the upstream connection ends.
 
 Mise's development tasks load all settings in `.env`, so it can also contain
 `LISTEN_ADDR`, `MODELS` or the proxy-key settings. See [mise's task-specific

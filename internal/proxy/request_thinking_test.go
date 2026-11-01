@@ -73,7 +73,8 @@ func TestThinkingBudgetReachesBackendIntact(t *testing.T) {
 		"router on":     `,"enable_thinking":true,"thinking_budget":10000`,
 		"while off":     `,"enable_thinking":false,"thinking_budget":1024`,
 		"zero":          `,"thinking_budget":0`,
-		"maximum":       `,"thinking_budget":32768`,
+		"former cap":    `,"thinking_budget":32768`,
+		"large budget":  `,"thinking_budget":131072`,
 		"with effort":   `,"reasoning_effort":"medium","thinking_budget":8192`,
 	} {
 		for _, stream := range []bool{false, true} {
@@ -133,15 +134,14 @@ func TestThinkingAliasRejectsAmbiguityAndInvalidBudgets(t *testing.T) {
 		"null template":         {`,"enable_thinking":true,"chat_template_kwargs":null`, "chat_template_kwargs", "chat_template_kwargs must be an object when enable_thinking is specified."},
 		"scalar template":       {`,"enable_thinking":true,"chat_template_kwargs":"private-value"`, "chat_template_kwargs", "chat_template_kwargs must be an object when enable_thinking is specified."},
 		"invalid nested toggle": {`,"enable_thinking":true,"chat_template_kwargs":{"enable_thinking":null}`, "chat_template_kwargs.enable_thinking", "chat_template_kwargs.enable_thinking must be a boolean."},
-		"private budget":        {`,"thinking_budget":"private-value"`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"null budget":           {`,"thinking_budget":null`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"negative budget":       {`,"thinking_budget":-1`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"large budget":          {`,"thinking_budget":32769`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"fractional budget":     {`,"thinking_budget":1.5`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"overflow budget":       {`,"thinking_budget":999999999999999999999999999999999`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"boolean budget":        {`,"thinking_budget":true`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"object budget":         {`,"thinking_budget":{"private-name":"private-value"}`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
-		"array budget":          {`,"thinking_budget":["private-value"]`, "thinking_budget", "thinking_budget must be an integer from 0 to 32768."},
+		"private budget":        {`,"thinking_budget":"private-value"`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"null budget":           {`,"thinking_budget":null`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"negative budget":       {`,"thinking_budget":-1`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"fractional budget":     {`,"thinking_budget":1.5`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"overflow budget":       {`,"thinking_budget":999999999999999999999999999999999`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"boolean budget":        {`,"thinking_budget":true`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"object budget":         {`,"thinking_budget":{"private-name":"private-value"}`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
+		"array budget":          {`,"thinking_budget":["private-value"]`, "thinking_budget", "thinking_budget must be a nonnegative integer."},
 	} {
 		t.Run(name, func(t *testing.T) {
 			backend := &fakeBackend{}
@@ -203,7 +203,7 @@ func TestThinkingAliasPreservesSDKEncryption(t *testing.T) {
 	}
 	for _, enabled := range []string{"true", "false"} {
 		t.Run(enabled, func(t *testing.T) {
-			input := strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":` + enabled + `,"thinking_budget":8192}`
+			input := strings.TrimSuffix(goodRequest, "}") + `,"enable_thinking":` + enabled + `,"thinking_budget":8192,"max_completion_tokens":65536}`
 			parsed, err := parseRequest([]byte(input))
 			if err != nil {
 				t.Fatal("supported thinking alias must parse")
@@ -232,6 +232,9 @@ func TestThinkingAliasPreservesSDKEncryption(t *testing.T) {
 			}
 			if string(fields["thinking_budget"]) != "8192" {
 				t.Fatal("the real SDK must preserve the reviewed numeric budget as observable metadata")
+			}
+			if string(fields["max_completion_tokens"]) != "65536" || fields["max_tokens"] != nil {
+				t.Fatal("the real SDK must preserve the larger completion limit alongside encrypted content")
 			}
 			if prepared.Request.Header.Get("X-Encryption-Version") != "2" || prepared.Request.Header.Get("X-Encrypt-All-Fields") != "true" {
 				t.Fatal("thinking aliases must preserve expanded model-key E2EE")

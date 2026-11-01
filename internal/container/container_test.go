@@ -306,6 +306,8 @@ func TestComposeConfiguration(t *testing.T) {
 	t.Setenv("MODELS", "synthetic-host-model")
 	t.Setenv("LISTEN_ADDR", "127.0.0.1:9099")
 	t.Setenv("PROXY_IMAGE", "")
+	t.Setenv("MAX_BODY_BYTES", "")
+	t.Setenv("REQUEST_TIMEOUT", "")
 	// Explicitly disable Compose's automatic dotenv loading. No real env file
 	// or secret mount is read, even when the caller has development state.
 	data := mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
@@ -337,14 +339,22 @@ func TestComposeConfiguration(t *testing.T) {
 	if service.Environment["NEAR_AI_API_KEY"] != nearKey || service.Environment["PROXY_API_KEY"] != proxyKey {
 		t.Fatal("Compose must supply credentials at runtime")
 	}
+	if service.Environment["MAX_BODY_BYTES"] != "0" || service.Environment["REQUEST_TIMEOUT"] != "0" {
+		t.Fatal("Compose must default to SDK body capacity and no inference deadline")
+	}
 	for _, setting := range []string{"LISTEN_ADDR", "MODELS"} {
 		if _, exists := service.Environment[setting]; exists {
 			t.Fatal("Compose must rely on image and application defaults for optional settings")
 		}
 	}
 	t.Setenv("PROXY_IMAGE", "ghcr.io/yaasha/near-e2ee-proxy@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("MAX_BODY_BYTES", "268435456")
+	t.Setenv("REQUEST_TIMEOUT", "30m")
 	data = mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
 	if json.Unmarshal(data, &config) != nil || config.Services["proxy"].Image != os.Getenv("PROXY_IMAGE") {
 		t.Fatal("operator-selected digest must reach the Compose service")
+	}
+	if config.Services["proxy"].Environment["MAX_BODY_BYTES"] != "268435456" || config.Services["proxy"].Environment["REQUEST_TIMEOUT"] != "30m" {
+		t.Fatal("operator-selected body capacity and timeout must reach the Compose service")
 	}
 }

@@ -150,25 +150,24 @@ func parseRequest(raw []byte) (Request, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return r, err
 	}
-	if !validModelID(r.Model) || len(r.Messages) == 0 || len(r.Messages) > 1024 {
+	if !validModelID(r.Model) || len(r.Messages) == 0 {
 		return r, errInvalid
 	}
-	if !within(r.Temperature, 0, 2) || !within(r.TopP, 0, 1) || !within(r.FrequencyPenalty, -2, 2) || !within(r.PresencePenalty, -2, 2) || (r.N != nil && *r.N != 1) {
+	if r.N != nil && *r.N != 1 {
 		return r, errInvalid
 	}
 	if r.MaxTokens != nil && r.MaxCompletionTokens != nil {
 		return r, errInvalid
 	}
+	// Completion capacity is model-dependent and includes reasoning. Preserve
+	// the caller's limit or omission instead of injecting a smaller budget.
+	// Body byte limits bound memory; callers/operators can set a deadline.
 	for _, limit := range []*int{r.MaxTokens, r.MaxCompletionTokens} {
-		if limit != nil && (*limit < 1 || *limit > 8192) {
+		if limit != nil && *limit < 1 {
 			return r, errInvalid
 		}
 	}
-	if r.MaxTokens == nil && r.MaxCompletionTokens == nil {
-		limit := 1024
-		r.MaxCompletionTokens = &limit
-	}
-	if r.ReasoningEffort != "" && !slices.Contains([]string{"none", "minimal", "low", "medium", "high"}, r.ReasoningEffort) {
+	if r.ReasoningEffort != "" && !slices.Contains([]string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}, r.ReasoningEffort) {
 		return r, errInvalid
 	}
 	if r.ResponseFormat != nil && !slices.Contains([]string{"text", "json_object"}, r.ResponseFormat.Type) {
@@ -178,9 +177,6 @@ func parseRequest(raw []byte) (Request, error) {
 		return r, errInvalid
 	}
 	names := map[string]bool{}
-	if len(r.Tools) > 128 {
-		return r, errInvalid
-	}
 	for _, tool := range r.Tools {
 		f := tool.Function
 		if tool.Type != "function" || !functionName.MatchString(f.Name) || names[f.Name] {
@@ -251,9 +247,6 @@ func parseRequest(raw []byte) (Request, error) {
 	return r, nil
 }
 
-func within(value *float64, low, high float64) bool {
-	return value == nil || (*value >= low && *value <= high)
-}
 func isObject(raw []byte) bool {
 	var v map[string]json.RawMessage
 	return json.Unmarshal(raw, &v) == nil && v != nil

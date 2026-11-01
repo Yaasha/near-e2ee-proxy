@@ -109,8 +109,8 @@ func TestChatJSONAndNativeSSE(t *testing.T) {
 			b := &fakeBackend{complete: func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 				var request map[string]any
 				json.Unmarshal(raw, &request)
-				if (request["stream"] == true) != stream || (request["stream_options"] != nil) != stream || request["max_completion_tokens"] != float64(1024) {
-					t.Fatal("preserve streaming intent and bounded generation")
+				if (request["stream"] == true) != stream || (request["stream_options"] != nil) != stream {
+					t.Fatal("preserve streaming intent and options")
 				}
 				return json.RawMessage(goodAnswer), nil
 			}}
@@ -142,6 +142,189 @@ func TestChatJSONAndNativeSSE(t *testing.T) {
 	}
 }
 
+func TestChatPreservesCompletionLimits(t *testing.T) {
+	for name, extra := range map[string]string{
+		"omitted":                  ``,
+		"small explicit limit":     `,"max_completion_tokens":1`,
+		"above former ceiling":     `,"max_completion_tokens":8193`,
+		"reasoning and answer":     `,"thinking_budget":32768,"max_completion_tokens":65536`,
+		"large legacy limit":       `,"max_tokens":131072`,
+		"reasoning without output": `,"thinking_budget":32768`,
+		"backend sampling":         `,"temperature":3,"top_p":1.1,"frequency_penalty":3,"presence_penalty":3`,
+		"max effort":               `,"reasoning_effort":"max"`,
+		"xhigh effort":             `,"reasoning_effort":"xhigh"`,
+	} {
+		for _, stream := range []bool{false, true} {
+			mode := "json"
+			if stream {
+				mode = "sse"
+			}
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				input := strings.TrimSuffix(goodRequest, "}") + extra
+				if stream {
+					input += `,"stream":true`
+				}
+				input += "}"
+				var original map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(input), &original); err != nil {
+					t.Fatal(err)
+				}
+				backend := &fakeBackend{complete: func(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+					var forwarded map[string]json.RawMessage
+					if err := json.Unmarshal(raw, &forwarded); err != nil {
+						t.Fatal(err)
+					}
+					for _, field := range []string{"max_tokens", "max_completion_tokens", "thinking_budget", "temperature", "top_p", "frequency_penalty", "presence_penalty", "reasoning_effort"} {
+						if string(forwarded[field]) != string(original[field]) {
+							t.Fatalf("proxy changed %s instead of preserving the client's limit or omission", field)
+						}
+					}
+					return json.RawMessage(goodAnswer), nil
+				}}
+				w := httptest.NewRecorder()
+				testServer(backend).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+				if w.Code != 200 || backend.calls.Load() != 1 {
+					t.Fatalf("completion limit must reach the backend once; got HTTP %d", w.Code)
+				}
+				if stream && !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
+					t.Fatal("preserving completion limits must retain verified stream completion")
+				}
+			})
+		}
+	}
+}
+
+func TestChatRejectsInvalidCompletionLimits(t *testing.T) {
+	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
+		for name, value := range map[string]string{
+			"zero":     `0`,
+			"negative": `-1`,
+			"fraction": `1.5`,
+			"overflow": `999999999999999999999999999999999`,
+			"string":   `"private-value"`,
+			"boolean":  `true`,
+			"object":   `{"private-name":"private-value"}`,
+			"array":    `[1]`,
+		} {
+			t.Run(field+"/"+name, func(t *testing.T) {
+				backend := &fakeBackend{}
+				input := strings.TrimSuffix(goodRequest, "}") + `,"` + field + `":` + value + `}`
+				w := httptest.NewRecorder()
+				testServer(backend).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+				if w.Code != 400 || backend.calls.Load() != 0 {
+					t.Fatal("invalid completion limits must fail locally before inference")
+				}
+				if strings.Contains(w.Body.String(), "private-value") || strings.Contains(w.Body.String(), "private-name") {
+					t.Fatal("invalid completion limits must not be reflected in errors")
+				}
+			})
+		}
+	}
+}
+
+func TestChatUsesCallerDeadline(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, parentDeadline := range []bool{false, true} {
+			ctx := context.Background()
+			if parentDeadline {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 10*time.Minute)
+				defer cancel()
+			}
+			backend := &fakeBackend{complete: func(got context.Context, _ json.RawMessage) (json.RawMessage, error) {
+				expected, wantDeadline := ctx.Deadline()
+				actual, hasDeadline := got.Deadline()
+				if hasDeadline != wantDeadline || (hasDeadline && !actual.Equal(expected)) {
+					t.Fatal("the proxy must not impose a shorter inference deadline")
+				}
+				return json.RawMessage(goodAnswer), nil
+			}}
+			input := goodRequest
+			if stream {
+				input = strings.TrimSuffix(input, "}") + `,"stream":true}`
+			}
+			w := httptest.NewRecorder()
+			testServer(backend).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input).WithContext(ctx))
+			if w.Code != 200 || backend.calls.Load() != 1 {
+				t.Fatal("caller-controlled inference must complete once")
+			}
+		}
+	}
+}
+
+func TestChatLargeContextAndAnswer(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		input := strings.Replace(goodRequest, "synthetic-prompt", strings.Repeat("p", (1<<20)+1), 1)
+		answer := strings.Replace(goodAnswer, "synthetic-answer", strings.Repeat("a", (8<<20)+1), 1)
+		backend := &fakeBackend{complete: func(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+			if len(raw) <= 1<<20 {
+				t.Fatal("the full context must reach the backend")
+			}
+			return json.RawMessage(answer), nil
+		}}
+		if stream {
+			input = strings.TrimSuffix(input, "}") + `,"stream":true}`
+		}
+		w := httptest.NewRecorder()
+		testServer(backend).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+		if w.Code != 200 || backend.calls.Load() != 1 || w.Body.Len() <= 8<<20 || strings.Contains(w.Body.String(), `"error"`) {
+			t.Fatal("proxy-specific context and response caps must not interrupt a valid completion")
+		}
+		if stream && !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
+			t.Fatal("the complete large stream must reach verified completion")
+		}
+	}
+}
+
+func TestConfiguredBodyLimits(t *testing.T) {
+	const limit = 512
+	backend := &fakeBackend{}
+	s := NewServer(Config{ProxyKey: testKey, MaxBodyBytes: limit}, backend)
+	w := httptest.NewRecorder()
+	input := strings.Replace(goodRequest, "synthetic-prompt", strings.Repeat("p", limit), 1)
+	s.ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+	if w.Code != 413 || backend.calls.Load() != 0 {
+		t.Fatal("an operator's body limit must reject oversized input before inference")
+	}
+	for _, stream := range []bool{false, true} {
+		backend := &fakeBackend{complete: func(context.Context, json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(strings.Replace(goodAnswer, "synthetic-answer", strings.Repeat("a", limit), 1)), nil
+		}}
+		s := NewServer(Config{ProxyKey: testKey, MaxBodyBytes: limit}, backend)
+		input := goodRequest
+		if stream {
+			input = strings.TrimSuffix(input, "}") + `,"stream":true}`
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+		if w.Code != 502 || backend.calls.Load() != 1 || strings.Contains(w.Body.String(), "[DONE]") || strings.Contains(w.Body.String(), strings.Repeat("a", limit)) {
+			t.Fatal("oversized responses must fail explicitly without successful completion")
+		}
+	}
+}
+
+func TestConfiguredInferenceTimeout(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		backend := &fakeBackend{complete: func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+			if _, ok := ctx.Deadline(); !ok {
+				t.Fatal("an explicitly configured deadline must reach inference")
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}}
+		input := goodRequest
+		if stream {
+			input = strings.TrimSuffix(input, "}") + `,"stream":true}`
+		}
+		w := httptest.NewRecorder()
+		s := NewServer(Config{ProxyKey: testKey, RequestTimeout: time.Millisecond}, backend)
+		s.ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+		if w.Code != 504 || !strings.Contains(w.Body.String(), `"code":"request_timeout"`) || backend.calls.Load() != 1 || strings.Contains(w.Body.String(), "[DONE]") {
+			t.Fatal("operator-configured timeouts must fail explicitly without replay or successful completion")
+		}
+	}
+}
+
 func TestVerificationFailureReleasesNoAnswerOrSSE(t *testing.T) {
 	b := &fakeBackend{complete: func(context.Context, json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(goodAnswer), errors.New("synthetic-secret-upstream-error")
@@ -167,7 +350,6 @@ func TestUnsupportedRequestsAndLimits(t *testing.T) {
 		"mime":               {"POST", "/v1/chat/completions", goodRequest, "Content-Type", "text/plain", 415},
 		"compression":        {"POST", "/v1/chat/completions", goodRequest, "Content-Encoding", "gzip", 415},
 		"spoofed encryption": {"POST", "/v1/chat/completions", goodRequest, "X-Model-Pub-Key", "attacker-key", 400},
-		"body limit":         {"POST", "/v1/chat/completions", strings.Repeat("x", MaxRequestBytes+1), "", "", 413},
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := &fakeBackend{}

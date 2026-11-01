@@ -5,20 +5,27 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"time"
+
+	"near-e2ee-proxy/internal/limits"
 )
 
 type Config struct {
-	Listen   string
-	NearKey  string
-	ProxyKey string
-	Models   []string // Advertised by /v1/models and probed by /readyz; not a restriction.
+	Listen         string
+	NearKey        string
+	ProxyKey       string
+	Models         []string      // Advertised by /v1/models and probed by /readyz; not a restriction.
+	MaxBodyBytes   int64         // Zero selects the SDK default for local and encrypted bodies.
+	RequestTimeout time.Duration // Zero leaves inference lifetime to the caller.
 }
 
 // LoadConfig reads only process environment. Mise (in development) or the
 // deployment environment handles dotenv files; the application never reads them.
 func LoadConfig() (Config, error) {
 	var config Config
+	var err error
 	config.NearKey = os.Getenv("NEAR_AI_API_KEY")
 	if !validToken(config.NearKey, 1, 4096) {
 		return Config{}, errors.New("NEAR_AI_API_KEY must contain a nonempty single-line ASCII token")
@@ -52,6 +59,18 @@ func LoadConfig() (Config, error) {
 	}
 	if len(config.Models) > 8 {
 		return Config{}, errors.New("at most eight discovery/readiness models are supported")
+	}
+	if value := os.Getenv("MAX_BODY_BYTES"); value != "" {
+		config.MaxBodyBytes, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || !limits.ValidBodyBytes(config.MaxBodyBytes) {
+			return Config{}, errors.New("MAX_BODY_BYTES must be a nonnegative integer with room for eight receipt bodies")
+		}
+	}
+	if value := os.Getenv("REQUEST_TIMEOUT"); value != "" {
+		config.RequestTimeout, err = time.ParseDuration(value)
+		if err != nil || config.RequestTimeout < 0 {
+			return Config{}, errors.New("REQUEST_TIMEOUT must be a nonnegative duration, such as 10m; 0 disables the proxy inference deadline")
+		}
 	}
 	return config, nil
 }

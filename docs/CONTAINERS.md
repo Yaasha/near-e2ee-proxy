@@ -21,7 +21,8 @@ docker compose --env-file /dev/null ps
 ```
 
 The explicit null env file disables Compose's automatic `.env` loading. Compose
-passes the two required settings into the process; the application continues to
+passes the required credentials and optional `MAX_BODY_BYTES`/`REQUEST_TIMEOUT`
+settings into the process; the application continues to
 read only environment variables. No credential is a build argument, image default
 or file mount. Proxy tokens must be 32–256 non-whitespace ASCII characters and
 differ from the nonempty, single-line ASCII NEAR token. Missing, malformed or equal
@@ -38,6 +39,14 @@ default and the application's discovery/readiness default; only credentials are
 required. It publishes `127.0.0.1:8080:8080`, uses a read-only root filesystem,
 drops all capabilities, sets `no-new-privileges`, and bounds process count. It needs no
 writable volume or temporary filesystem for startup and local HTTP operation.
+
+Inference has no default proxy deadline. Compose passes `REQUEST_TIMEOUT=0` and
+`MAX_BODY_BYTES=0` unless explicitly set in the process environment; zero body
+capacity selects the SDK's 64 MiB default, rather than an unlimited allocation.
+For larger encrypted exchanges, set `MAX_BODY_BYTES` before starting or recreating
+the service. Set `REQUEST_TIMEOUT` to a duration such as `30m` only if you want a
+proxy inference deadline. Larger byte budgets require more memory; see
+[limits and error categories](COMPATIBILITY.md#limits-and-error-categories).
 
 For a direct run equivalent to the default Compose setup:
 
