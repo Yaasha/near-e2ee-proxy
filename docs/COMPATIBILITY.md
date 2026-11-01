@@ -151,6 +151,7 @@ Response ID and model must remain the same. Other unknown output fields are reje
 | Receipt retention | One minute after capture |
 | Inference deadline | No default proxy deadline; optional `REQUEST_TIMEOUT` or caller deadline |
 | Response write/flush | `WRITE_TIMEOUT`; omitted or `0` uses 30 seconds per operation, shortened by any request deadline/cancellation |
+| Fixed terminal-error delivery | One nonrenewable window, at most one second or `WRITE_TIMEOUT`, whichever is smaller; may outlive the inference deadline |
 | Readiness deadline | Three minutes; independent of inference |
 
 The limits bound individual buffers and caches, not total process RAM. Verification
@@ -162,7 +163,17 @@ concurrency slot until cancellation or connection failure. A blocked response
 write/flush instead ends at `WRITE_TIMEOUT` or the request deadline/cancellation,
 whichever comes first. The write bound is disarmed between successful operations
 so HTTP/1 and HTTP/2 generation pauses do not consume it. The final buffered HTTP
-flush is bounded as well. HTTP/1 bodies rejected before consumption (including
+flush is bounded as well. Only fixed JSON/SSE error paths can enter a separate
+terminal-delivery phase, with one absolute deadline capped at one second and
+`WRITE_TIMEOUT`. This permits JSON 504 before streaming or an SSE timeout error
+after provisional output when inference expires during an upstream wait. It
+cannot resume inference, deliver an answer, release buffered tools/usage/finish
+reasons or send `[DONE]`. Caller cancellation or a failed/interrupted write
+prevents reopening the transport. Inference cancellation interrupts active normal
+writes without expiring an idle HTTP/2 stream before it can report the error.
+Upload read deadlines are cleared once the full body is consumed, so they do not
+cancel the HTTP/1 connection's background reader during terminal delivery.
+HTTP/1 bodies rejected before consumption (including
 authentication, routing, media-type and overload failures) are not drained for
 keep-alive: their connection is closed and body reads are expired. Authenticated,
 admitted uploads clear that rejection deadline and retain caller-controlled
@@ -221,6 +232,10 @@ the larger budgets and removed inference deadline have not been live-tested.
 Transport regressions cover incomplete fixed-length/chunked rejected bodies,
 nonreading JSON/SSE clients, blocked flushes, request cancellation, accepted slow
 uploads and HTTP/1/HTTP/2 generation pauses beyond the per-write timeout.
+Actual HTTP/1/HTTP/2 transport tests also cover JSON 504 and pre-/post-preview SSE
+timeout errors after inference expiry, withholding buffered tools and success
+markers. Nonreading JSON/error-stream peers remain bounded during terminal error
+delivery. These tests do not rely on ResponseRecorder deadline behavior.
 
 Offline HTTP regressions cover the top-level thinking alias for JSON and SSE,
 canonical normalization, conflicting controls, strict type/duplicate/unknown-field

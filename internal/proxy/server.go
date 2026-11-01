@@ -67,7 +67,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithCancel(r.Context())
 	}
 	defer cancel()
-	writer, stop := boundResponseWrites(w, ctx, cancel, s.writeTimeout)
+	writer, stop := boundResponseWrites(w, ctx, r.Context(), cancel, s.writeTimeout)
 	defer stop()
 	// Default to closing unread HTTP/1 bodies. Only an authenticated request
 	// admitted for body parsing clears this read deadline and connection header.
@@ -171,6 +171,9 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
+	// The upload is complete. Leaving its deadline armed would cancel the
+	// HTTP/1 background reader when inference times out, before error delivery.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	request, err := parseRequest(raw)
 	if err != nil {
 		message, param := "Invalid request, unsupported field, or invalid model ID; see the compatibility documentation.", ""
@@ -195,7 +198,7 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	answer, err := s.backend.Complete(ctx, upstream)
-	if err != nil || int64(len(answer)) > s.maxBodyBytes {
+	if err != nil || ctx.Err() != nil || int64(len(answer)) > s.maxBodyBytes {
 		if ctx.Err() != nil {
 			writeError(w, 504, "server_error", "request_timeout", "The inference deadline expired or the request was cancelled.")
 		} else {
@@ -204,6 +207,10 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	completion, err := parseCompletion(answer, request.Model)
+	if ctx.Err() != nil {
+		writeError(w, 504, "server_error", "request_timeout", "The inference deadline expired or the request was cancelled.")
+		return
+	}
 	if err != nil {
 		writeError(w, 502, "server_error", "invalid_upstream_response", "The verified response has an unsupported shape.")
 		return
@@ -222,6 +229,7 @@ func writeError(w http.ResponseWriter, status int, kind, code, message string) {
 }
 
 func writeErrorParam(w http.ResponseWriter, status int, kind, code, message, param string) {
+	beginTerminalError(w)
 	var parameter any
 	if param != "" {
 		parameter = param

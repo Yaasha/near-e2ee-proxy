@@ -349,3 +349,131 @@ func TestWriteTimeoutDoesNotLimitGeneration(t *testing.T) {
 		})
 	}
 }
+
+func TestInferenceTimeoutDeliversTerminalError(t *testing.T) {
+	for _, http2 := range []bool{false, true} {
+		for _, mode := range []string{"JSON", "JSON late success", "SSE before preview", "SSE after preview", "SSE late success"} {
+			t.Run(fmt.Sprintf("http2=%v/%s", http2, mode), func(t *testing.T) {
+				backend := &transportBackend{
+					complete: func(ctx context.Context) (json.RawMessage, error) {
+						<-ctx.Done()
+						if mode == "JSON late success" {
+							return json.RawMessage(transportAnswer), nil
+						}
+						return nil, ctx.Err()
+					},
+					stream: func(ctx context.Context, emit func(json.RawMessage) error) error {
+						if mode == "SSE late success" {
+							if err := emit(json.RawMessage(`{"id":"synthetic","object":"chat.completion.chunk","created":1,"model":"synthetic-model","choices":[{"index":0,"delta":{"content":"preview"},"finish_reason":"stop"}]}`)); err != nil {
+								return err
+							}
+							<-ctx.Done()
+							return nil
+						}
+						if mode == "SSE after preview" {
+							// Executable fields must remain buffered even while a
+							// separate error-delivery window is allowed after timeout.
+							if err := emit(json.RawMessage(`{"id":"synthetic","object":"chat.completion.chunk","created":1,"model":"synthetic-model","choices":[{"index":0,"delta":{"content":"preview","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":null}]}`)); err != nil {
+								return err
+							}
+						}
+						<-ctx.Done()
+						return ctx.Err()
+					},
+				}
+				server := httptest.NewUnstartedServer(nil)
+				server.Config = newHTTPServer(proxy.Config{ProxyKey: transportKey, RequestTimeout: 100 * time.Millisecond}, backend)
+				server.EnableHTTP2 = http2
+				server.StartTLS()
+				defer server.Close()
+				client := server.Client()
+				client.Timeout = 2 * time.Second
+				input := transportRequest
+				if strings.HasPrefix(mode, "SSE") {
+					input = strings.TrimSuffix(input, "}") + `,"stream":true}`
+				}
+				request, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(input))
+				request.Header.Set("Authorization", "Bearer "+transportKey)
+				request.Header.Set("Content-Type", "application/json")
+				response, err := client.Do(request)
+				if err != nil {
+					t.Fatal("a healthy client must receive a timeout response instead of EOF")
+				}
+				defer response.Body.Close()
+				body, err := io.ReadAll(response.Body)
+				if err != nil || !strings.Contains(string(body), `"code":"request_timeout"`) {
+					t.Fatal("deliver the complete fixed timeout error after inference expires")
+				}
+				if mode == "SSE after preview" || mode == "SSE late success" {
+					if response.StatusCode != 200 || !strings.Contains(string(body), `"content":"preview"`) || !strings.Contains(string(body), "event: error\n") {
+						t.Fatal("a started stream must end with an explicit safe error")
+					}
+				} else if response.StatusCode != 504 || !json.Valid(body) {
+					t.Fatal("an unstarted response must deliver JSON HTTP 504")
+				}
+				for _, forbidden := range []string{"[DONE]", `"finish_reason":"`, "call_1", "lookup", "total_tokens"} {
+					if strings.Contains(string(body), forbidden) {
+						t.Fatal("the timeout error window must not release tools or successful completion")
+					}
+				}
+				if (response.ProtoMajor == 2) != http2 || backend.calls.Load() != 1 {
+					t.Fatal("exercise the requested protocol without replaying inference")
+				}
+			})
+		}
+	}
+}
+
+func TestTimeoutErrorDeliveryToNonreaderIsBounded(t *testing.T) {
+	for _, preview := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preview=%v", preview), func(t *testing.T) {
+			expired := make(chan struct{})
+			backend := &transportBackend{
+				complete: func(ctx context.Context) (json.RawMessage, error) {
+					<-ctx.Done()
+					close(expired)
+					return nil, ctx.Err()
+				},
+				stream: func(ctx context.Context, emit func(json.RawMessage) error) error {
+					if err := emit(json.RawMessage(`{"id":"synthetic","object":"chat.completion.chunk","created":1,"model":"synthetic-model","choices":[{"index":0,"delta":{"content":"preview"},"finish_reason":null}]}`)); err != nil {
+						return err
+					}
+					<-ctx.Done()
+					close(expired)
+					return ctx.Err()
+				},
+			}
+			client, returned, closed, _ := serveTransportPipe(t, proxy.Config{ProxyKey: transportKey, RequestTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond}, backend)
+			input := transportRequest
+			if preview {
+				input = strings.TrimSuffix(input, "}") + `,"stream":true}`
+			}
+			_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+			if _, err := fmt.Fprintf(client, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", transportKey, len(input), input); err != nil {
+				t.Fatal("send authenticated request")
+			}
+			if preview {
+				response, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: "POST"})
+				if err != nil || response.StatusCode != 200 {
+					t.Fatal("receive the initial preview before stopping reads")
+				}
+				defer response.Body.Close()
+			}
+			select {
+			case <-expired:
+			case <-time.After(time.Second):
+				t.Fatal("inference did not time out")
+			}
+			select {
+			case <-returned:
+			case <-time.After(time.Second):
+				t.Fatal("terminal error delivery retained an inference slot")
+			}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("terminal error delivery retained a connection beyond its separate bound")
+			}
+		})
+	}
+}

@@ -138,7 +138,11 @@ encrypted bytes for model receipts, with a combined cache budget of eight times
 `MAX_BODY_BYTES`. `REQUEST_TIMEOUT` is opt-in; a request waiting for upload or
 upstream output can otherwise occupy a slot until cancellation or disconnection.
 Individual response writes have a renewable `WRITE_TIMEOUT` bound and are
-interrupted by request cancellation. HTTP/1 requests whose bodies are rejected or
+interrupted by request cancellation. Fixed terminal errors have a separate,
+nonrenewable delivery window of at most one second (shorter when `WRITE_TIMEOUT`
+is smaller), so an inference timeout can still deliver JSON 504 or an SSE error
+to a healthy client. Caller disconnection and failed writes cannot reopen that
+window. HTTP/1 requests whose bodies are rejected or
 ignored close their connections without waiting to drain incomplete bodies.
 
 Mise's development tasks load all settings in `.env`, so it can also contain

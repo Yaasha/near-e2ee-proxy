@@ -111,6 +111,15 @@ and interrupted on cancellation. Successful writes disarm that bound between
 operations, preserving long generation pauses on HTTP/1 and HTTP/2. Final buffered
 HTTP writes remain bounded. A failed write cancels inference; it cannot authorize
 successful completion, and an unwritable connection may prevent error delivery.
+Fixed JSON/SSE errors alone may use one separate terminal-delivery window, capped
+at the smaller of one second and `WRITE_TIMEOUT`. Its absolute deadline is never
+renewed, including during final HTTP flushing. This lets an inference deadline
+expire without suppressing a safe timeout error to a healthy client. It does not
+extend inference or authorize answers, tools, usage, finish reasons or `[DONE]`.
+Caller cancellation and failed/interrupted writes cannot reopen the transport;
+inference cancellation only expires a socket deadline when a normal write is
+active. Upload read deadlines are cleared after full body consumption so they
+cannot cancel a healthy connection's background reader during error delivery.
 HTTP/1 request bodies rejected or ignored before consumption close their
 connections with expired body-read deadlines, preventing Go's automatic drain
 from retaining unauthenticated sockets/goroutines. Accepted uploads clear that

@@ -216,6 +216,9 @@ func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json
 	// Stream invokes this callback as decrypted chunks arrive. Its return value
 	// is the verification boundary: callbacks alone never authorize tool delivery.
 	err := s.backend.Stream(ctx, request, func(raw json.RawMessage) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		delta, err := state.accept(raw, model)
 		if err != nil {
 			return err
@@ -225,6 +228,9 @@ func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json
 		}
 		return write(delta, nil, nil)
 	})
+	if err == nil {
+		err = ctx.Err()
+	}
 	var tools []toolDelta
 	if err == nil {
 		tools, err = state.finishTools()
@@ -240,6 +246,7 @@ func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json
 		}
 		// The HTTP status is already 200. Explicit failure and absence of finish/
 		// [DONE] are essential, but cannot retract text a client already consumed.
+		beginTerminalError(w)
 		if ctx.Err() != nil {
 			_, _ = fmt.Fprint(w, "event: error\ndata: {\"error\":{\"message\":\"The inference deadline expired or the request was cancelled; discard provisional output.\",\"type\":\"server_error\",\"code\":\"request_timeout\"}}\n\n")
 		} else {
