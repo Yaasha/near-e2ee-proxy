@@ -9,6 +9,8 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+
+	"near-e2ee-proxy/internal/limits"
 )
 
 // Stream uses the SDK's real encrypted stream and exact-wire receipt retention.
@@ -42,7 +44,7 @@ func (c *Client) Stream(ctx context.Context, request json.RawMessage, emit func(
 		return ErrVerification
 	}
 	id := ""
-	err = readEvents(response.Body, func(data json.RawMessage) error {
+	err = readEvents(response.Body, c.maxBodyBytes, func(data json.RawMessage) error {
 		var chunk struct {
 			ID string `json:"id"`
 		}
@@ -61,11 +63,11 @@ func (c *Client) Stream(ctx context.Context, request json.RawMessage, emit func(
 // readEvents consumes through EOF, not merely [DONE]: the SDK must finish its
 // original-wire capture before VerifyResponse. Neither raw terminal markers nor
 // upstream error text are forwarded. Limits apply to the decrypted SSE stream.
-func readEvents(reader io.Reader, emit func(json.RawMessage) error) error {
-	const totalLimit = 8 << 20
+func readEvents(reader io.Reader, totalLimit int64, emit func(json.RawMessage) error) error {
+	totalLimit = limits.BodyBytes(totalLimit)
 	limited := &io.LimitedReader{R: reader, N: totalLimit + 1}
 	scanner := bufio.NewScanner(limited)
-	scanner.Buffer(make([]byte, 4096), 1<<20)
+	scanner.Buffer(make([]byte, 4096), int(totalLimit)+1)
 	scanner.Split(eventLine)
 	var data strings.Builder
 	done := false
@@ -105,7 +107,7 @@ func readEvents(reader io.Reader, emit func(json.RawMessage) error) error {
 			line = "data:"
 		}
 		if strings.HasPrefix(line, "data:") {
-			if data.Len()+len(line) > 1<<20 {
+			if int64(data.Len())+int64(len(line)) > totalLimit {
 				return ErrVerification
 			}
 			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))

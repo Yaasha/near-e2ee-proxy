@@ -11,6 +11,8 @@ import (
 	"crypto/x509"
 	"debug/elf"
 	"encoding/json"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +109,7 @@ func TestContainer(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(destination, "go.mod")); err != nil {
 			t.Fatal("context exclusion test must include a real allowed input")
 		}
+		assertProductionSourcesIncluded(t, root, destination)
 	})
 	t.Run("compiler drift fails before dependency download", func(t *testing.T) {
 		for _, name := range []string{"mise.toml", "mise.lock", "go.mod"} {
@@ -293,6 +297,55 @@ func TestContainer(t *testing.T) {
 	}
 }
 
+// Follow application imports from the command rather than copying the Docker
+// allowlist into this test. A new local package must reach the build context,
+// while unrelated local files and test sources stay excluded.
+func assertProductionSourcesIncluded(t *testing.T, root, destination string) {
+	t.Helper()
+	pending := []string{"cmd/near-e2ee-proxy"}
+	seen := map[string]bool{}
+	for len(pending) > 0 {
+		dir := pending[0]
+		pending = pending[1:]
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		entries, err := os.ReadDir(filepath.Join(root, dir))
+		if err != nil {
+			t.Fatal("read production source directory")
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+				continue
+			}
+			relative := filepath.Join(dir, entry.Name())
+			if strings.HasSuffix(entry.Name(), "_test.go") {
+				if _, err := os.Stat(filepath.Join(destination, relative)); !os.IsNotExist(err) {
+					t.Fatalf("test source must stay outside Docker context: %s", relative)
+				}
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(destination, relative)); err != nil {
+				t.Fatalf("production source missing from Docker context: %s", relative)
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(root, relative), nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal("parse production imports")
+			}
+			for _, dependency := range file.Imports {
+				name, err := strconv.Unquote(dependency.Path.Value)
+				if err != nil {
+					t.Fatal("parse production import path")
+				}
+				if local, ok := strings.CutPrefix(name, "near-e2ee-proxy/"); ok {
+					pending = append(pending, filepath.FromSlash(local))
+				}
+			}
+		}
+	}
+}
+
 func writeFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if os.MkdirAll(filepath.Dir(path), 0700) != nil || os.WriteFile(path, data, 0600) != nil {
@@ -306,6 +359,9 @@ func TestComposeConfiguration(t *testing.T) {
 	t.Setenv("MODELS", "synthetic-host-model")
 	t.Setenv("LISTEN_ADDR", "127.0.0.1:9099")
 	t.Setenv("PROXY_IMAGE", "")
+	t.Setenv("MAX_BODY_BYTES", "")
+	t.Setenv("REQUEST_TIMEOUT", "")
+	t.Setenv("WRITE_TIMEOUT", "")
 	// Explicitly disable Compose's automatic dotenv loading. No real env file
 	// or secret mount is read, even when the caller has development state.
 	data := mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
@@ -337,14 +393,23 @@ func TestComposeConfiguration(t *testing.T) {
 	if service.Environment["NEAR_AI_API_KEY"] != nearKey || service.Environment["PROXY_API_KEY"] != proxyKey {
 		t.Fatal("Compose must supply credentials at runtime")
 	}
+	if service.Environment["MAX_BODY_BYTES"] != "0" || service.Environment["REQUEST_TIMEOUT"] != "0" || service.Environment["WRITE_TIMEOUT"] != "0" {
+		t.Fatal("Compose must default to SDK body capacity and no inference deadline")
+	}
 	for _, setting := range []string{"LISTEN_ADDR", "MODELS"} {
 		if _, exists := service.Environment[setting]; exists {
 			t.Fatal("Compose must rely on image and application defaults for optional settings")
 		}
 	}
 	t.Setenv("PROXY_IMAGE", "ghcr.io/yaasha/near-e2ee-proxy@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("MAX_BODY_BYTES", "268435456")
+	t.Setenv("REQUEST_TIMEOUT", "30m")
+	t.Setenv("WRITE_TIMEOUT", "45s")
 	data = mustDocker(t, "", "compose", "--env-file", os.DevNull, "--file", "../../compose.yaml", "config", "--format", "json")
 	if json.Unmarshal(data, &config) != nil || config.Services["proxy"].Image != os.Getenv("PROXY_IMAGE") {
 		t.Fatal("operator-selected digest must reach the Compose service")
+	}
+	if config.Services["proxy"].Environment["MAX_BODY_BYTES"] != "268435456" || config.Services["proxy"].Environment["REQUEST_TIMEOUT"] != "30m" || config.Services["proxy"].Environment["WRITE_TIMEOUT"] != "45s" {
+		t.Fatal("operator-selected body capacity and timeout must reach the Compose service")
 	}
 }

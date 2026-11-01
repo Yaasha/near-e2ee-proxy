@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"near-e2ee-proxy/internal/limits"
 )
 
 type streamChunk struct {
@@ -81,18 +83,19 @@ type bufferedTool struct {
 }
 type streamState struct {
 	// Only metadata and the latest usage are kept here; text is not accumulated.
-	completion Completion
-	finish     *string
-	tools      map[int]*bufferedTool
-	bytes      int
+	completion   Completion
+	finish       *string
+	tools        map[int]*bufferedTool
+	bytes        int64
+	maxBodyBytes int64
 }
 
 // accept validates every chunk before anything is exposed. Only text-like fields
 // are returned for preview. Tool fields stay in this bounded request-local state.
 func (s *streamState) accept(raw json.RawMessage, model string) (streamDelta, error) {
-	s.bytes += len(raw)
+	s.bytes += int64(len(raw))
 	var chunk streamChunk
-	if s.bytes > MaxResponseBytes || !validJSON(raw) || json.Unmarshal(raw, &chunk) != nil || chunk.Model != model || chunk.Object != "chat.completion.chunk" || !opaqueID.MatchString(chunk.ID) || chunk.Created <= 0 || len(chunk.Choices) > 1 {
+	if s.bytes > limits.BodyBytes(s.maxBodyBytes) || !validJSON(raw) || json.Unmarshal(raw, &chunk) != nil || chunk.Model != model || chunk.Object != "chat.completion.chunk" || !opaqueID.MatchString(chunk.ID) || chunk.Created <= 0 || len(chunk.Choices) > 1 {
 		return streamDelta{}, errInvalid
 	}
 	if s.completion.ID == "" {
@@ -126,7 +129,7 @@ func (s *streamState) accept(raw json.RawMessage, model string) (streamDelta, er
 		return streamDelta{}, errInvalid
 	}
 	for _, call := range d.ToolCalls {
-		if call.Index == nil || *call.Index < 0 || *call.Index >= 128 || (call.ID != "" && !opaqueID.MatchString(call.ID)) || (call.Type != "" && call.Type != "function") {
+		if call.Index == nil || *call.Index < 0 || (call.ID != "" && !opaqueID.MatchString(call.ID)) || (call.Type != "" && call.Type != "function") {
 			return streamDelta{}, errInvalid
 		}
 		tool := s.tools[*call.Index]
@@ -181,7 +184,7 @@ func (s *streamState) finishTools() ([]toolDelta, error) {
 }
 
 func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json.RawMessage, model string, includeUsage bool) {
-	state := streamState{}
+	state := streamState{maxBodyBytes: s.maxBodyBytes}
 	started := false
 	// Re-encode allowed fields, never forward untrusted SSE controls or terminal
 	// markers. The final receipt covers the original wire stream held by the SDK.
@@ -213,6 +216,9 @@ func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json
 	// Stream invokes this callback as decrypted chunks arrive. Its return value
 	// is the verification boundary: callbacks alone never authorize tool delivery.
 	err := s.backend.Stream(ctx, request, func(raw json.RawMessage) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		delta, err := state.accept(raw, model)
 		if err != nil {
 			return err
@@ -222,6 +228,9 @@ func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json
 		}
 		return write(delta, nil, nil)
 	})
+	if err == nil {
+		err = ctx.Err()
+	}
 	var tools []toolDelta
 	if err == nil {
 		tools, err = state.finishTools()
@@ -237,7 +246,12 @@ func (s *Server) stream(ctx context.Context, w http.ResponseWriter, request json
 		}
 		// The HTTP status is already 200. Explicit failure and absence of finish/
 		// [DONE] are essential, but cannot retract text a client already consumed.
-		_, _ = fmt.Fprint(w, "event: error\ndata: {\"error\":{\"message\":\"The encrypted stream could not be verified; discard provisional output.\",\"type\":\"server_error\",\"code\":\"verification_failed\"}}\n\n")
+		beginTerminalError(w)
+		if ctx.Err() != nil {
+			_, _ = fmt.Fprint(w, "event: error\ndata: {\"error\":{\"message\":\"The inference deadline expired or the request was cancelled; discard provisional output.\",\"type\":\"server_error\",\"code\":\"request_timeout\"}}\n\n")
+		} else {
+			_, _ = fmt.Fprint(w, "event: error\ndata: {\"error\":{\"message\":\"The encrypted stream could not be verified; discard provisional output.\",\"type\":\"server_error\",\"code\":\"verification_failed\"}}\n\n")
+		}
 		_ = http.NewResponseController(w).Flush()
 		return
 	}

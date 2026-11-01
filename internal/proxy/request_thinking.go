@@ -12,7 +12,7 @@ func (e *requestFieldError) Unwrap() error { return errInvalid }
 // normalizeThinking translates a reviewed client alias into NEAR's documented
 // toggle. Only a boolean is accepted: it remains observable protocol metadata,
 // like the existing nested toggle, and cannot carry arbitrary unencrypted text.
-// A bounded integer budget is also observable metadata and is forwarded unchanged,
+// A numeric budget is also observable metadata and is forwarded unchanged,
 // with model-dependent semantics like reasoning_effort. Neither field carries text.
 // Unknown fields are preserved so the ordinary recursive allowlist rejects them.
 func normalizeThinking(raw []byte) ([]byte, error) {
@@ -22,9 +22,9 @@ func normalizeThinking(raw []byte) ([]byte, error) {
 	}
 	if rawBudget, exists := request["thinking_budget"]; exists {
 		var budget *int
-		if json.Unmarshal(rawBudget, &budget) != nil || budget == nil || *budget < 0 || *budget > 32768 {
+		if json.Unmarshal(rawBudget, &budget) != nil || budget == nil || *budget < 0 {
 			return nil, &requestFieldError{
-				param: "thinking_budget", message: "thinking_budget must be an integer from 0 to 32768.",
+				param: "thinking_budget", message: "thinking_budget must be a nonnegative integer.",
 			}
 		}
 		// Preserve the budget even when thinking is off. Do not infer a toggle,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,6 +12,49 @@ import (
 
 func syntheticChunk(delta string, finish string) json.RawMessage {
 	return json.RawMessage(`{"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1,"model":"synthetic-model","choices":[{"index":0,"delta":` + delta + `,"finish_reason":` + finish + `}]}`)
+}
+
+func TestStreamReasoningTokenExhaustion(t *testing.T) {
+	for _, verified := range []bool{true, false} {
+		t.Run(map[bool]string{true: "verified", false: "failed receipt"}[verified], func(t *testing.T) {
+			w := httptest.NewRecorder()
+			b := &fakeBackend{stream: func(_ context.Context, _ json.RawMessage, emit func(json.RawMessage) error) error {
+				for _, chunk := range []json.RawMessage{
+					syntheticChunk(`{"role":"assistant","reasoning_content":"An unfinished thought"}`, `null`),
+					syntheticChunk(`{}`, `"length"`),
+					json.RawMessage(`{"id":"chatcmpl-synthetic","object":"chat.completion.chunk","created":1,"model":"synthetic-model","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1024,"total_tokens":1027,"reasoning_tokens":1024}}`),
+				} {
+					if err := emit(chunk); err != nil {
+						return err
+					}
+				}
+				body := w.Body.String()
+				if !w.Flushed || !strings.Contains(body, `"reasoning_content":"An unfinished thought"`) {
+					t.Fatal("reasoning must stream provisionally even when no answer follows")
+				}
+				if strings.Contains(body, `"finish_reason":"length"`) || strings.Contains(body, `"completion_tokens"`) || strings.Contains(body, "[DONE]") {
+					t.Fatal("token exhaustion must not bypass receipt verification")
+				}
+				if !verified {
+					return errors.New("synthetic-private-receipt-error")
+				}
+				return nil
+			}}
+			input := strings.TrimSuffix(goodRequest, "}") + `,"stream":true,"stream_options":{"include_usage":true}}`
+			testServer(b).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", input))
+			body := w.Body.String()
+			if verified {
+				if w.Code != 200 || !strings.Contains(body, `"finish_reason":"length"`) || !strings.Contains(body, `"completion_tokens_details":{"reasoning_tokens":1024}`) || !strings.HasSuffix(body, "data: [DONE]\n\n") || strings.Contains(body, "event: error") {
+					t.Fatal("verified token exhaustion must report length, reasoning usage and successful stream completion")
+				}
+			} else if !strings.Contains(body, "event: error") || strings.Contains(body, `"finish_reason":"length"`) || strings.Contains(body, `"completion_tokens"`) || strings.Contains(body, "[DONE]") || strings.Contains(body, "synthetic-private") {
+				t.Fatal("failed receipt must emit a safe error without terminal success or usage")
+			}
+			if b.calls.Load() != 1 {
+				t.Fatal("token exhaustion must never retry inference")
+			}
+		})
+	}
 }
 
 func TestStreamTextBeforeReceiptToolsAfterReceipt(t *testing.T) {
@@ -124,6 +168,45 @@ func TestStreamCancellation(t *testing.T) {
 	testServer(b).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", strings.TrimSuffix(goodRequest, "}")+`,"stream":true}`).WithContext(ctx))
 	if w.Code != 504 || strings.Contains(w.Body.String(), "[DONE]") {
 		t.Fatal("stream cancellation must fail without success")
+	}
+}
+
+func TestStreamCancellationAfterPreview(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &fakeBackend{stream: func(ctx context.Context, _ json.RawMessage, emit func(json.RawMessage) error) error {
+		if err := emit(syntheticChunk(`{"content":"preview"}`, `null`)); err != nil {
+			return err
+		}
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	w := httptest.NewRecorder()
+	testServer(b).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", strings.TrimSuffix(goodRequest, "}")+`,"stream":true}`).WithContext(ctx))
+	body := w.Body.String()
+	if w.Code != 200 || !strings.Contains(body, `"content":"preview"`) || !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"request_timeout"`) || strings.Contains(body, "[DONE]") || strings.Contains(body, `"finish_reason":"`) || b.calls.Load() != 1 {
+		t.Fatal("caller cancellation after preview must report cancellation without replay or successful completion")
+	}
+}
+
+func TestStreamLargeToolSet(t *testing.T) {
+	w := httptest.NewRecorder()
+	b := &fakeBackend{stream: func(_ context.Context, _ json.RawMessage, emit func(json.RawMessage) error) error {
+		for i := 0; i < 129; i++ {
+			delta := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"call_%d","type":"function","function":{"name":"lookup","arguments":"{}"}}]}`, i, i)
+			if err := emit(syntheticChunk(delta, `null`)); err != nil {
+				return err
+			}
+		}
+		if strings.Contains(w.Body.String(), "call_") {
+			t.Fatal("a large tool set must still wait for model receipt verification")
+		}
+		return emit(syntheticChunk(`{}`, `"tool_calls"`))
+	}}
+	testServer(b).ServeHTTP(w, httpRequest("POST", "/v1/chat/completions", strings.TrimSuffix(goodRequest, "}")+`,"stream":true}`))
+	if w.Code != 200 || strings.Count(w.Body.String(), `"type":"function"`) != 129 || !strings.Contains(w.Body.String(), `"index":128`) || !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
+		t.Fatal("all validated calls must be released after verification without a proxy count cap")
 	}
 }
 

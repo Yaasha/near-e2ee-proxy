@@ -33,7 +33,7 @@ be shared across instances/configurations, so receipts do not identify one VM.
 5. Exactly one upstream inference attempt, followed by model-receipt verification
    against the SDK's retained exact encrypted bytes and preflight evidence.
    Gateway-only signatures cannot satisfy this requirement. Only transient receipt
-   retrieval may retry, with a bounded delay and the request deadline.
+   retrieval may retry, with a bounded delay and any caller/operator deadline.
 6. Output validation before delivery. JSON answers and SSE tool calls/terminal
    events wait for verification; streaming text is provisional as explained below.
    New local JSON/SSE encoding is not itself covered by the upstream signature.
@@ -88,12 +88,50 @@ The top-level `enable_thinking` alias accepts only a boolean and normalizes to
 `chat_template_kwargs.enable_thinking` before the request reaches the SDK. This
 control remains observable protocol metadata; prompts and tool data retain the
 existing encryption requirements. Conflicting controls fail locally. The
-`thinking_budget` extension accepts only integers from 0 to 32,768 and remains
+`thinking_budget` extension accepts only nonnegative integers and remains
 observable numeric metadata through the SDK. It cannot carry arbitrary text or
 objects. The proxy forwards the budget unchanged; backend support and enforcement
 are model-dependent. It never changes completion-token limits or request
 deadlines in response to a budget. Invalid controls receive fixed public field
 names and explanations; errors never include values or arbitrary field names.
+
+Completion-token limits are positive integers chosen by the client and forwarded
+unchanged. The proxy does not impose a token ceiling or inject a default when
+limits are omitted; model limits and defaults belong to the backend. Thinking
+budgets, history and tool counts have no independent proxy ceiling. Numeric
+sampling ranges are validated by the backend. There is no automatic inference
+continuation or retry. Clients can set explicit completion limits to control
+generation and cost.
+
+Inference has no default proxy wall deadline: it honors caller cancellation and
+any opt-in `REQUEST_TIMEOUT`. An authenticated upload or upstream wait can occupy
+a slot until cancelled or disconnected. Each active response write/flush is
+bounded by `WRITE_TIMEOUT` (30 seconds by default), shortened by a request deadline
+and interrupted on cancellation. Successful writes disarm that bound between
+operations, preserving long generation pauses on HTTP/1 and HTTP/2. Final buffered
+HTTP writes remain bounded. A failed write cancels inference; it cannot authorize
+successful completion, and an unwritable connection may prevent error delivery.
+Fixed JSON/SSE errors alone may use one separate terminal-delivery window, capped
+at the smaller of one second and `WRITE_TIMEOUT`. Its absolute deadline is never
+renewed, including during final HTTP flushing. This lets an inference deadline
+expire without suppressing a safe timeout error to a healthy client. It does not
+extend inference or authorize answers, tools, usage, finish reasons or `[DONE]`.
+Caller cancellation and failed/interrupted writes cannot reopen the transport;
+inference cancellation only expires a socket deadline when a normal write is
+active. Upload read deadlines are cleared after full body consumption so they
+cannot cancel a healthy connection's background reader during error delivery.
+HTTP/1 request bodies rejected or ignored before consumption close their
+connections with expired body-read deadlines, preventing Go's automatic drain
+from retaining unauthenticated sockets/goroutines. Accepted uploads clear that
+rejection deadline. Header-read, between-request idle, readiness and SDK
+verification deadlines remain independent. Local body/SSE bounds share the
+SDK's 64 MiB default capacity, adjustable through `MAX_BODY_BYTES`; encrypted wire
+overhead counts toward that capacity. Receipt cache capacity is eight body limits
+to accommodate four concurrent request/response pairs. These finite byte and
+concurrency bounds protect memory without choosing a token or reasoning budget.
+Increasing body capacity increases potential memory use. Limits do not remove the
+requirement for a verified model receipt or permit truncated output to be labeled
+as successful completion.
 
 Local HTTP is appropriate for loopback. Use HTTPS or an encrypted tunnel when
 traffic crosses other machines. Avoid HTTP debug dumps, request-body capture and

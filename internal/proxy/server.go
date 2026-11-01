@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"near-e2ee-proxy/internal/limits"
 )
 
-const MaxRequestBytes = 1 << 20
-const MaxResponseBytes = 8 << 20
-const RequestTimeout = 180 * time.Second
+// Defaults used by offline/live harnesses; active handlers use config.MaxBodyBytes.
+const MaxRequestBytes = limits.DefaultBodyBytes
+const MaxResponseBytes = limits.DefaultBodyBytes
 
 // Backend is small so HTTP behavior can be tested offline. The production
 // implementation verifies receipts before completion. Stream callbacks carry
@@ -27,18 +29,53 @@ type Backend interface {
 }
 
 type Server struct {
-	backend       Backend
-	keyHash       [32]byte
-	keyConfigured bool
-	models        []string
-	slots         chan struct{}
+	backend        Backend
+	keyHash        [32]byte
+	keyConfigured  bool
+	models         []string
+	maxBodyBytes   int64
+	requestTimeout time.Duration
+	writeTimeout   time.Duration
+	slots          chan struct{}
 }
 
 func NewServer(config Config, backend Backend) *Server {
-	return &Server{backend: backend, keyHash: sha256.Sum256([]byte(config.ProxyKey)), keyConfigured: len(config.ProxyKey) >= 32 && len(config.ProxyKey) <= 256, models: append([]string(nil), config.Models...), slots: make(chan struct{}, 4)}
+	writeTimeout := config.WriteTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = DefaultWriteTimeout
+	}
+	return &Server{
+		backend: backend, keyHash: sha256.Sum256([]byte(config.ProxyKey)),
+		keyConfigured: len(config.ProxyKey) >= 32 && len(config.ProxyKey) <= 256,
+		models:        append([]string(nil), config.Models...), slots: make(chan struct{}, 4),
+		maxBodyBytes: limits.BodyBytes(config.MaxBodyBytes), requestTimeout: config.RequestTimeout,
+		writeTimeout: writeTimeout,
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	timeout := s.requestTimeout
+	if r.Method == http.MethodGet {
+		// Readiness is bounded independently of potentially long inference.
+		timeout = 3 * time.Minute
+	}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(r.Context(), timeout)
+	} else {
+		ctx, cancel = context.WithCancel(r.Context())
+	}
+	defer cancel()
+	writer, stop := boundResponseWrites(w, ctx, r.Context(), cancel, s.writeTimeout)
+	defer stop()
+	// Default to closing unread HTTP/1 bodies. Only an authenticated request
+	// admitted for body parsing clears this read deadline and connection header.
+	closeUnreadBody(writer, r)
+	s.serveHTTP(ctx, writer, r)
+}
+
+func (s *Server) serveHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.URL.Path == "/healthz" && r.Method == http.MethodGet {
@@ -76,8 +113,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "rate_limit_error", "overloaded", "The proxy is at its concurrency limit.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), RequestTimeout)
-	defer cancel()
 	if r.Method == http.MethodGet {
 		models := make([]any, 0, len(s.models))
 		for _, model := range s.models {
@@ -119,18 +154,26 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		writeError(w, 415, "invalid_request_error", "unsupported_media_type", "Use uncompressed application/json with UTF-8 text.")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodyBytes)
 	defer r.Body.Close()
+	// No upload wall deadline is added unless the caller/operator supplied one.
+	deadline, _ := ctx.Deadline()
+	_ = http.NewResponseController(w).SetReadDeadline(deadline)
+	w.Header().Del("Connection")
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		closeUnreadBody(w, r)
 		var size *http.MaxBytesError
 		if errors.As(err, &size) {
-			writeError(w, 413, "invalid_request_error", "request_too_large", "The request exceeds the 1 MiB limit.")
+			writeError(w, 413, "invalid_request_error", "request_too_large", "The request exceeds the configured body size limit.")
 		} else {
 			writeError(w, 400, "invalid_request_error", "invalid_body", "Cannot read the request body.")
 		}
 		return
 	}
+	// The upload is complete. Leaving its deadline armed would cancel the
+	// HTTP/1 background reader when inference times out, before error delivery.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	request, err := parseRequest(raw)
 	if err != nil {
 		message, param := "Invalid request, unsupported field, or invalid model ID; see the compatibility documentation.", ""
@@ -155,7 +198,7 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	answer, err := s.backend.Complete(ctx, upstream)
-	if err != nil || len(answer) > MaxResponseBytes {
+	if err != nil || ctx.Err() != nil || int64(len(answer)) > s.maxBodyBytes {
 		if ctx.Err() != nil {
 			writeError(w, 504, "server_error", "request_timeout", "The inference deadline expired or the request was cancelled.")
 		} else {
@@ -164,6 +207,10 @@ func (s *Server) chat(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	completion, err := parseCompletion(answer, request.Model)
+	if ctx.Err() != nil {
+		writeError(w, 504, "server_error", "request_timeout", "The inference deadline expired or the request was cancelled.")
+		return
+	}
 	if err != nil {
 		writeError(w, 502, "server_error", "invalid_upstream_response", "The verified response has an unsupported shape.")
 		return
@@ -182,6 +229,7 @@ func writeError(w http.ResponseWriter, status int, kind, code, message string) {
 }
 
 func writeErrorParam(w http.ResponseWriter, status int, kind, code, message, param string) {
+	beginTerminalError(w)
 	var parameter any
 	if param != "" {
 		parameter = param

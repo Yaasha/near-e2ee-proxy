@@ -15,6 +15,16 @@ import (
 	"near-e2ee-proxy/internal/proxy"
 )
 
+func TestHTTPServerDoesNotCutOffInference(t *testing.T) {
+	s := newHTTPServer(proxy.Config{}, nil)
+	if s.WriteTimeout != 0 || s.ReadTimeout != 0 {
+		t.Fatal("server-wide body deadlines must not cut off long inference or large uploads")
+	}
+	if s.ReadHeaderTimeout <= 0 || s.IdleTimeout <= 0 {
+		t.Fatal("connections still need header and between-request idle bounds")
+	}
+}
+
 func TestHealthcheckCLI(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "proxy")
 	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {

@@ -21,7 +21,8 @@ request.
 
 ## Accepted input
 
-- A canonical `model` selected per request, with at least one and at most 1,024 messages.
+- A canonical `model` selected per request, with at least one message. No local
+  message-count ceiling; model context capacity and body byte limits apply.
 - Roles: `system`, `developer`, `user`, `assistant`, `tool`.
 - String content or text-only parts (`type: text`, `text`). Assistant content may
   be omitted/null for function calls. Tool content contains the tool result.
@@ -31,11 +32,15 @@ request.
   flag. Schemas are encrypted as a whole and are not interpreted by this proxy.
 - `tool_choice`: `none`, `auto`, `required`, or a named declared function.
 - `parallel_tool_calls`, assistant `tool_calls`, tool-result `tool_call_id`.
-- `temperature` (0–2), `top_p` (0–1), presence/frequency penalties (-2–2), `seed`.
-- `max_tokens` or `max_completion_tokens`, from 1 to 8,192; not both. Default:
-  1,024 completion tokens. Only one choice (`n: 1`) is supported.
-- `reasoning_effort`: `none`, `minimal`, `low`, `medium`, `high`.
-- `thinking_budget`: integer from 0 to 32,768, forwarded unchanged. Null and
+- Numeric `temperature`, `top_p`, presence/frequency penalties, and integer `seed`.
+  The backend validates model-dependent numeric ranges.
+- `max_tokens` or `max_completion_tokens`: positive integers; not both. Explicit
+  limits are forwarded unchanged, with no proxy token ceiling. If both are omitted,
+  the proxy leaves the completion budget to the backend. The selected model still
+  determines supported limits and defaults. Only one choice (`n: 1`) is supported.
+- `reasoning_effort`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+- `thinking_budget`: nonnegative integer, forwarded unchanged without a proxy
+  token ceiling. Null and
   non-integer values are rejected. Its meaning and support depend on the backend.
 - `chat_template_kwargs`: only boolean `enable_thinking`.
 - Top-level boolean `enable_thinking`: normalized to
@@ -65,7 +70,7 @@ sampling settings. It never accepts arbitrary text.
 proxy preserves it as numeric metadata through SDK encryption; it does not drop
 it, infer a thinking toggle, convert it into an output-token limit or approximate
 it with an effort tier. Invalid types and values return HTTP 400 with
-`error.param: "thinking_budget"` and a fixed range/type explanation.
+`error.param: "thinking_budget"` and a fixed type explanation.
 
 Acceptance does not guarantee that the selected backend honors this field or
 enforces an exact reasoning-token cap. A backend may ignore it or reject it;
@@ -73,7 +78,8 @@ upstream failures still receive the proxy's safe error. NEAR documents different
 controls for different models, including a distinct `thinking_token_budget` field
 for GLM-5.3 Flash; this proxy does not rename `thinking_budget` to that field.
 `reasoning_effort` selects an effort level, not an exact reasoning-token budget.
-The existing completion-token limits and request deadline remain unchanged.
+The reasoning budget does not change the client's completion limit or the request
+deadline.
 
 Function names use 1–64 letters/digits/underscores/hyphens. Call IDs use 1–256 of
 the same characters and must be unique in the replayed history. Tool results must
@@ -103,12 +109,28 @@ disable response buffering in your reverse proxy if you want incremental display
 
 SSE responses carry `X-Response-Verification: end-of-stream`, an informational
 header, not a proof clients verify themselves. After text starts, failures use
-`event: error` with a fixed OpenAI-shaped error and close without a finish event or
-`[DONE]`; the HTTP status is already 200. Clients must handle this as failure.
+`event: error` with a fixed OpenAI-shaped error when the connection is writable,
+and close without a finish event or `[DONE]`; the HTTP status is already 200.
+Write timeouts may close the connection before an error frame can be delivered.
+Clients must handle either case as failure.
 Before any SSE output, failures use ordinary JSON HTTP errors. Standard clients
 may already act on provisional text; see [the tradeoff](SECURITY.md#streaming-tradeoff).
 
 Output supports `stop`, `length`, `tool_calls` and `content_filter` finish reasons.
+`length` means generation exhausted its completion-token limit; it can end in
+the middle of reasoning or an answer. [NEAR counts reasoning tokens as part of
+completion tokens](https://docs.near.ai/cloud/reasoning-models), so a small
+completion budget may leave no room for an answer to a complex question.
+Set `max_completion_tokens` explicitly to control the combined budget for reasoning
+and the answer; a `thinking_budget` does not increase that limit or reserve answer
+tokens. The proxy does not impose a token ceiling or inject a default; omitted
+limits use the backend's behavior. Inference has no default proxy wall deadline;
+caller cancellation, any explicitly configured `REQUEST_TIMEOUT`, upstream limits
+and the configurable body byte capacity still apply.
+After receipt verification, a length-limited stream still ends with
+`finish_reason: "length"` and `[DONE]`. A stream error or missing successful
+completion must be treated as failure instead. The proxy never automatically
+continues or retries a length-limited response.
 Malformed/incomplete tool arguments are rejected rather than released for execution.
 Numeric/null SGLang `matched_stop` metadata is discarded; free-text values fail.
 SGLang's numeric `usage.reasoning_tokens` is mapped to completion-token details.
@@ -120,19 +142,42 @@ Response ID and model must remain the same. Other unknown output fields are reje
 | Limit | Value |
 | --- | --- |
 | Active HTTP operations | Four; excess requests receive 429 |
-| Request body | 1 MiB |
+| Local request/response and upstream encrypted bodies | `MAX_BODY_BYTES`; omitted or `0` selects the SDK's 64 MiB default |
 | JSON nesting | 64 levels |
-| Tools | 128 |
-| Upstream encrypted request/response | SDK limit: 32 MiB each |
-| Decrypted response returned locally | 8 MiB |
-| Decrypted SSE line/event | 1 MiB |
-| SDK retained receipt bodies | 128 MiB combined budget; 16 cache entries |
+| Message/tool count | No independent local ceiling; body capacity and backend limits apply |
+| Decrypted SSE stream/line/event | Same configured body capacity, without smaller independent ceilings |
+| SDK retained receipt bodies | Eight times body capacity (512 MiB by default); 16 cache entries |
 | Attestation cache | Five minutes |
 | Receipt retention | One minute after capture |
-| Inference/verification deadline | Three minutes |
+| Inference deadline | No default proxy deadline; optional `REQUEST_TIMEOUT` or caller deadline |
+| Response write/flush | `WRITE_TIMEOUT`; omitted or `0` uses 30 seconds per operation, shortened by any request deadline/cancellation |
+| Fixed terminal-error delivery | One nonrenewable window, at most one second or `WRITE_TIMEOUT`, whichever is smaller; may outlive the inference deadline |
+| Readiness deadline | Three minutes; independent of inference |
 
 The limits bound individual buffers and caches, not total process RAM. Verification
-libraries and concurrent callers need additional memory. The SDK's shared
+libraries and concurrent callers need additional memory. Raising `MAX_BODY_BYTES`
+also raises exact-wire capture and cache memory budgets. Encryption overhead counts
+toward the SDK body capacity; it is not a token or context-window limit. An omitted
+inference timeout allows an authenticated upload or upstream wait to occupy a
+concurrency slot until cancellation or connection failure. A blocked response
+write/flush instead ends at `WRITE_TIMEOUT` or the request deadline/cancellation,
+whichever comes first. The write bound is disarmed between successful operations
+so HTTP/1 and HTTP/2 generation pauses do not consume it. The final buffered HTTP
+flush is bounded as well. Only fixed JSON/SSE error paths can enter a separate
+terminal-delivery phase, with one absolute deadline capped at one second and
+`WRITE_TIMEOUT`. This permits JSON 504 before streaming or an SSE timeout error
+after provisional output when inference expires during an upstream wait. It
+cannot resume inference, deliver an answer, release buffered tools/usage/finish
+reasons or send `[DONE]`. Caller cancellation or a failed/interrupted write
+prevents reopening the transport. Inference cancellation interrupts active normal
+writes without expiring an idle HTTP/2 stream before it can report the error.
+Upload read deadlines are cleared once the full body is consumed, so they do not
+cancel the HTTP/1 connection's background reader during terminal delivery.
+HTTP/1 bodies rejected before consumption (including
+authentication, routing, media-type and overload failures) are not drained for
+keep-alive: their connection is closed and body reads are expired. Authenticated,
+admitted uploads clear that rejection deadline and retain caller-controlled
+lifetime. The SDK's shared
 verification work can briefly outlive a cancelled caller, with its own bounded
 deadline; closing the client cancels it. Raw upstream errors are
 never relayed. Auth errors use 401, unsupported inputs 400/415, size errors 413,
@@ -141,21 +186,20 @@ and elapsed/cancelled request contexts 504 where the connection is still writabl
 
 ## Thinking controls through routers
 
-Hermes v0.22.5's default custom-provider request uses `reasoning_effort: medium`.
-9router v0.5.111 can translate Qwen effort levels into top-level `enable_thinking`
-and `thinking_budget`, even when its provider override is Auto. The proxy accepts
-these controls together: it normalizes the boolean alias and preserves the
-numeric budget. The low/medium/high/on budget values (1,024/8,192/24,576/10,000)
-fall within the accepted range. This removes their previous local rejection;
-the selected backend still determines the resulting reasoning behavior.
+Clients and routers may translate `reasoning_effort` into top-level
+`enable_thinking` and `thinking_budget`. The proxy accepts these controls together:
+it normalizes the boolean alias and preserves a valid numeric budget. For example,
+`{"enable_thinking": true, "thinking_budget": 8192}` becomes
+`{"chat_template_kwargs": {"enable_thinking": true}, "thinking_budget": 8192}`.
+The selected backend still determines the resulting reasoning behavior.
 Conflicting top-level and nested toggles receive a fixed field-specific error.
 Other unsupported fields retain the general `unsupported_request` response.
 Request values, arbitrary field names and raw decoder errors are never reflected.
 
-To bypass the router's budget translation while requesting thinking, configure
-the matching Hermes custom provider's `extra_body` with `reasoning_effort: null` and
-`chat_template_kwargs: {enable_thinking: true}`, and leave the 9router provider
-override on Auto. Use `false` for the nested boolean to request thinking off.
+To request a boolean thinking mode without a numeric budget, send
+`chat_template_kwargs: {enable_thinking: true}` and configure any intervening
+router to preserve that field without adding a budget. Use `false` for the nested
+boolean to request thinking off.
 The proxy does not execute tools on behalf of these clients.
 
 ## What was actually tested
@@ -177,16 +221,29 @@ Offline tests cover authentication, unsupported fields and routes, size limits,
 overload, cancellation, strict evidence policy, receipt failure before tool release,
 provisional text flushing, fragmented tool assembly, SSE truncation/limits and
 dependency encryption/signature contracts.
+Synthetic reasoning-only token-exhaustion tests cover verified `length` completion,
+reasoning usage normalization and receipt failure without terminal success.
+JSON and SSE regressions cover omitted completion limits, explicit limits above
+8,192, reasoning/output budget independence and rejection of invalid token counts.
+Offline tests also cover caller-controlled deadlines, optional configured timeouts,
+custom body limits, contexts over 1 MiB, answers/events over 8 MiB, histories over
+1,024 messages and tool sets over 128 calls. These checks use synthetic backends;
+the larger budgets and removed inference deadline have not been live-tested.
+Transport regressions cover incomplete fixed-length/chunked rejected bodies,
+nonreading JSON/SSE clients, blocked flushes, request cancellation, accepted slow
+uploads and HTTP/1/HTTP/2 generation pauses beyond the per-write timeout.
+Actual HTTP/1/HTTP/2 transport tests also cover JSON 504 and pre-/post-preview SSE
+timeout errors after inference expiry, withholding buffered tools and success
+markers. Nonreading JSON/error-stream peers remain bounded during terminal error
+delivery. These tests do not rely on ResponseRecorder deadline behavior.
 
 Offline HTTP regressions cover the top-level thinking alias for JSON and SSE,
 canonical normalization, conflicting controls, strict type/duplicate/unknown-field
 rejection, budget forwarding/type/range errors and preservation of real SDK
 prompt encryption. Router low/medium/high/on payloads reach the synthetic backend
 in JSON and SSE tests without altering the completion-token limit.
-Investigation requests through 9router v0.5.111 covered basic JSON and an explicit
-null reasoning override. The new alias and budget handling have not been
-live-tested; a full Hermes conversation and its tool lifecycle have not been
-integration-tested.
+The new alias and budget handling have not been live-tested. Full client
+conversations and their tool lifecycles have not been integration-tested.
 
 No particular LiteLLM, Hermes, OpenCode, Orion, OpenAI SDK or external bridge version
 has full client integration coverage. Configure a custom Chat Completions provider using

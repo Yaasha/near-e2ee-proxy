@@ -37,7 +37,7 @@ func TestProxyBenchmark(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	backend, err := New(key)
+	backend, err := New(key, 0)
 	if err != nil {
 		t.Fatal("cannot construct verified client")
 	}
@@ -51,7 +51,7 @@ func TestProxyBenchmark(t *testing.T) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: proxy.RequestTimeout + time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: transport, Timeout: 3*time.Minute + time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	input := map[string]any{
 		"model": model, "messages": []any{map[string]string{"role": "user", "content": "Write a long numbered list of short facts about basic arithmetic. Continue the list until the output limit. Do not include an introduction or conclusion."}},
 		"temperature": 0, "seed": 42, "max_completion_tokens": 256,

@@ -20,6 +20,15 @@ packages or global tool versions. Application dependencies belong in `go.mod`.
 
 ## Credentials and live testing
 
+Public contributions use synthetic, generic examples. Keep user-provided
+hostnames, infrastructure layout, private configuration, software/version
+combinations and diagnostic transcripts out of source, documentation, commit
+messages, issues and PR text unless explicitly authorized for publication.
+Authorization to investigate or test a deployment does not authorize publishing
+its details. Before publishing, review the complete diff and accompanying text
+against this rule; describe the protocol behavior without identifying a user's
+deployment.
+
 Credentials come only from environment variables. Never open, print or commit
 real `.env` files or credential values.
 Mise loads `.env` only for `dev`, `live` and `benchmark`, with output redaction

@@ -2,12 +2,37 @@ package proxy
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 const testModel = "synthetic-model"
 const goodRequest = `{"model":"synthetic-model","messages":[{"role":"user","content":"synthetic-prompt"}]}`
+
+func TestLongMessageHistory(t *testing.T) {
+	message := `{"role":"user","content":"synthetic"}`
+	input := `{"model":"synthetic-model","messages":[` + strings.Repeat(message+",", 1024) + message + `]}`
+	r, err := parseRequest([]byte(input))
+	if err != nil || len(r.Messages) != 1025 {
+		t.Fatal("model context capacity must not be limited by a proxy message count")
+	}
+}
+
+func TestLargeToolSet(t *testing.T) {
+	r := Request{Model: testModel, Messages: []Message{{Role: "user", Content: json.RawMessage(`"synthetic"`)}}}
+	for i := 0; i < 129; i++ {
+		r.Tools = append(r.Tools, Tool{Type: "function", Function: Function{Name: "tool_" + strconv.Itoa(i)}})
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseRequest(raw)
+	if err != nil || len(parsed.Tools) != 129 {
+		t.Fatal("the backend must determine tool capacity instead of a proxy tool-count cap")
+	}
+}
 
 func TestRequestRejectsUnknownAndUnencryptedFields(t *testing.T) {
 	cases := map[string]string{
@@ -28,7 +53,6 @@ func TestRequestRejectsUnknownAndUnencryptedFields(t *testing.T) {
 		"sampling string":               strings.TrimSuffix(goodRequest, "}") + `,"temperature":"private"}`,
 		"many outputs":                  strings.TrimSuffix(goodRequest, "}") + `,"n":2}`,
 		"token conflict":                strings.TrimSuffix(goodRequest, "}") + `,"max_tokens":20,"max_completion_tokens":20}`,
-		"oversize output":               strings.TrimSuffix(goodRequest, "}") + `,"max_tokens":8193}`,
 		"negative tokens":               strings.TrimSuffix(goodRequest, "}") + `,"max_tokens":-1}`,
 		"stream options without stream": strings.TrimSuffix(goodRequest, "}") + `,"stream_options":{"include_usage":true}}`,
 		"deep JSON":                     `{"model":"synthetic-model","messages":[],"tools":` + strings.Repeat("[", 70) + `0` + strings.Repeat("]", 70) + `}`,
@@ -58,8 +82,8 @@ func TestToolHistoryAndSchemaArePreserved(t *testing.T) {
 		t.Fatal("supported tool history must parse")
 	}
 	encoded, err := json.Marshal(r)
-	if err != nil || !strings.Contains(string(encoded), "private-field") || !strings.Contains(string(encoded), "private-result") || r.MaxCompletionTokens == nil || *r.MaxCompletionTokens != 1024 {
-		t.Fatal("preserve schema/results and set a bounded default output")
+	if err != nil || !strings.Contains(string(encoded), "private-field") || !strings.Contains(string(encoded), "private-result") {
+		t.Fatal("preserve schema/results")
 	}
 	for name, invalid := range map[string]string{
 		"orphan":           strings.Replace(input, `"tool_call_id":"call_1"`, `"tool_call_id":"call_other"`, 1),

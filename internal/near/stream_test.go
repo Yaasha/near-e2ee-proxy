@@ -11,11 +11,29 @@ import (
 	"testing/iotest"
 )
 
+func TestReadEventsLargeStream(t *testing.T) {
+	for _, size := range []int{(1 << 20) + 1, (8 << 20) + 1} {
+		payload := `{"id":"synthetic-completion","content":"` + strings.Repeat("a", size) + `"}`
+		wire := "data: " + payload + "\n\ndata: [DONE]\n\n"
+		count := 0
+		err := readEvents(strings.NewReader(wire), 0, func(raw json.RawMessage) error {
+			count++
+			if len(raw) != len(payload) {
+				t.Fatal("large events must not be truncated")
+			}
+			return nil
+		})
+		if err != nil || count != 1 {
+			t.Fatal("valid streams within the SDK body limit must survive local SSE parsing")
+		}
+	}
+}
+
 func TestReadEventsFramingAndLimits(t *testing.T) {
 	for _, separator := range []string{"\n", "\r\n", "\r"} {
 		wire := strings.Join([]string{": heartbeat", "event: message", `data: {"id":`, `data: "synthetic-completion"}`, "", "data: [DONE]", "", ""}, separator)
 		count := 0
-		err := readEvents(iotest.OneByteReader(strings.NewReader(wire)), func(b json.RawMessage) error {
+		err := readEvents(iotest.OneByteReader(strings.NewReader(wire)), 1024, func(b json.RawMessage) error {
 			count++
 			if !json.Valid(b) {
 				t.Fatal("multiline JSON must survive fragmented SSE framing")
@@ -32,20 +50,20 @@ func TestReadEventsFramingAndLimits(t *testing.T) {
 		"duplicate done":  "data: [DONE]\n\ndata: [DONE]\n\n",
 		"error event":     "event: error\ndata: {}\n\ndata: [DONE]\n\n",
 		"unknown control": "retry: 100\ndata: [DONE]\n\n",
-		"long line":       "data: " + strings.Repeat("x", 1<<20) + "\n\ndata: [DONE]\n\n",
-		"large total":     strings.Repeat(": heartbeat\n", 800000) + "data: [DONE]\n\n",
+		"long line":       "data: " + strings.Repeat("x", 1024) + "\n\ndata: [DONE]\n\n",
+		"large total":     strings.Repeat(": heartbeat\n", 100) + "data: [DONE]\n\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if readEvents(strings.NewReader(wire), func(json.RawMessage) error { return nil }) == nil {
+			if readEvents(strings.NewReader(wire), 1024, func(json.RawMessage) error { return nil }) == nil {
 				t.Fatal("invalid stream must fail closed")
 			}
 		})
 	}
 	wire := "data: {}\n\ndata: [DONE]\n\n"
-	if readEvents(strings.NewReader(wire), func(json.RawMessage) error { return errors.New("client disconnected") }) == nil {
+	if readEvents(strings.NewReader(wire), 1024, func(json.RawMessage) error { return errors.New("client disconnected") }) == nil {
 		t.Fatal("callback cancellation must stop parsing")
 	}
-	if readEvents(iotest.ErrReader(errors.New("read failure")), func(json.RawMessage) error { return nil }) == nil {
+	if readEvents(iotest.ErrReader(errors.New("read failure")), 1024, func(json.RawMessage) error { return nil }) == nil {
 		t.Fatal("transport failure must invalidate stream")
 	}
 }

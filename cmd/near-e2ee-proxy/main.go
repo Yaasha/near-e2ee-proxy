@@ -45,7 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	} // Configuration errors are fixed messages, never values.
-	client, err := near.New(config.NearKey)
+	client, err := near.New(config.NearKey, config.MaxBodyBytes)
 	if err != nil {
 		log.Fatal("cannot initialize confidential inference")
 	}
@@ -54,11 +54,7 @@ func main() {
 	if err != nil {
 		log.Fatal("cannot listen on LISTEN_ADDR")
 	}
-	server := &http.Server{
-		Handler: proxy.NewServer(config, client), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 15 * time.Second, WriteTimeout: proxy.RequestTimeout + 10*time.Second,
-		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
-	}
+	server := newHTTPServer(config, client)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	shutdownDone := make(chan struct{})
@@ -80,4 +76,15 @@ func main() {
 	// Serve returns as soon as Shutdown closes the listener. Wait for its active
 	// requests to finish before closing the SDK and cancelling their verification.
 	<-shutdownDone
+}
+
+func newHTTPServer(config proxy.Config, backend proxy.Backend) *http.Server {
+	return &http.Server{
+		Handler: proxy.NewServer(config, backend), ReadHeaderTimeout: 5 * time.Second,
+		// A server-wide WriteTimeout would cut off a healthy long inference.
+		// The handler bounds individual writes and closes unread request bodies.
+		// Caller cancellation and optional REQUEST_TIMEOUT govern inference;
+		// IdleTimeout only bounds time between requests.
+		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
+	}
 }
