@@ -11,4 +11,5 @@
 !cmd/near-e2ee-proxy/*.go
 !internal/proxy/*.go
 !internal/near/*.go
+!internal/limits/*.go
 **/*_test.go

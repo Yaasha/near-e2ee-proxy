@@ -11,6 +11,8 @@ import (
 	"crypto/x509"
 	"debug/elf"
 	"encoding/json"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +109,7 @@ func TestContainer(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(destination, "go.mod")); err != nil {
 			t.Fatal("context exclusion test must include a real allowed input")
 		}
+		assertProductionSourcesIncluded(t, root, destination)
 	})
 	t.Run("compiler drift fails before dependency download", func(t *testing.T) {
 		for _, name := range []string{"mise.toml", "mise.lock", "go.mod"} {
@@ -290,6 +294,55 @@ func TestContainer(t *testing.T) {
 				t.Fatal("SIGTERM must reach PID 1 and exit cleanly within the grace period")
 			}
 		})
+	}
+}
+
+// Follow application imports from the command rather than copying the Docker
+// allowlist into this test. A new local package must reach the build context,
+// while unrelated local files and test sources stay excluded.
+func assertProductionSourcesIncluded(t *testing.T, root, destination string) {
+	t.Helper()
+	pending := []string{"cmd/near-e2ee-proxy"}
+	seen := map[string]bool{}
+	for len(pending) > 0 {
+		dir := pending[0]
+		pending = pending[1:]
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		entries, err := os.ReadDir(filepath.Join(root, dir))
+		if err != nil {
+			t.Fatal("read production source directory")
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+				continue
+			}
+			relative := filepath.Join(dir, entry.Name())
+			if strings.HasSuffix(entry.Name(), "_test.go") {
+				if _, err := os.Stat(filepath.Join(destination, relative)); !os.IsNotExist(err) {
+					t.Fatalf("test source must stay outside Docker context: %s", relative)
+				}
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(destination, relative)); err != nil {
+				t.Fatalf("production source missing from Docker context: %s", relative)
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(root, relative), nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal("parse production imports")
+			}
+			for _, dependency := range file.Imports {
+				name, err := strconv.Unquote(dependency.Path.Value)
+				if err != nil {
+					t.Fatal("parse production import path")
+				}
+				if local, ok := strings.CutPrefix(name, "near-e2ee-proxy/"); ok {
+					pending = append(pending, filepath.FromSlash(local))
+				}
+			}
+		}
 	}
 }
 
